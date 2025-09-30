@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * hibernate.c:  Hibernaton support specific for sparc64.
  *
  * Copyright (C) 2013 Kirill V Tkhai (tkhai@yandex.ru)
  */
 
+#include <linux/suspend.h>
 #include <linux/mm.h>
 
 #include <asm/hibernate.h>

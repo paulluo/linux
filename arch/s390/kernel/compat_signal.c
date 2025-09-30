@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    Copyright IBM Corp. 2000, 2006
  *    Author(s): Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
@@ -23,10 +24,12 @@
 #include <linux/tty.h>
 #include <linux/personality.h>
 #include <linux/binfmts.h>
+#include <asm/vdso-symbols.h>
+#include <asm/access-regs.h>
 #include <asm/ucontext.h>
 #include <linux/uaccess.h>
 #include <asm/lowcore.h>
-#include <asm/switch_to.h>
+#include <asm/fpu.h>
 #include "compat_linux.h"
 #include "compat_ptrace.h"
 #include "entry.h"
@@ -49,124 +52,11 @@ typedef struct
 	struct ucontext32 uc;
 } rt_sigframe32;
 
-static inline void sigset_to_sigset32(unsigned long *set64,
-				      compat_sigset_word *set32)
-{
-	set32[0] = (compat_sigset_word) set64[0];
-	set32[1] = (compat_sigset_word)(set64[0] >> 32);
-}
-
-static inline void sigset32_to_sigset(compat_sigset_word *set32,
-				      unsigned long *set64)
-{
-	set64[0] = (unsigned long) set32[0] | ((unsigned long) set32[1] << 32);
-}
-
-int copy_siginfo_to_user32(compat_siginfo_t __user *to, const siginfo_t *from)
-{
-	int err;
-
-	/* If you change siginfo_t structure, please be sure
-	   this code is fixed accordingly.
-	   It should never copy any pad contained in the structure
-	   to avoid security leaks, but must copy the generic
-	   3 ints plus the relevant union member.  
-	   This routine must convert siginfo from 64bit to 32bit as well
-	   at the same time.  */
-	err = __put_user(from->si_signo, &to->si_signo);
-	err |= __put_user(from->si_errno, &to->si_errno);
-	err |= __put_user(from->si_code, &to->si_code);
-	if (from->si_code < 0)
-		err |= __copy_to_user(&to->_sifields._pad, &from->_sifields._pad, SI_PAD_SIZE);
-	else {
-		switch (siginfo_layout(from->si_signo, from->si_code)) {
-		case SIL_RT:
-			err |= __put_user(from->si_int, &to->si_int);
-			/* fallthrough */
-		case SIL_KILL:
-			err |= __put_user(from->si_pid, &to->si_pid);
-			err |= __put_user(from->si_uid, &to->si_uid);
-			break;
-		case SIL_CHLD:
-			err |= __put_user(from->si_pid, &to->si_pid);
-			err |= __put_user(from->si_uid, &to->si_uid);
-			err |= __put_user(from->si_utime, &to->si_utime);
-			err |= __put_user(from->si_stime, &to->si_stime);
-			err |= __put_user(from->si_status, &to->si_status);
-			break;
-		case SIL_FAULT:
-			err |= __put_user((unsigned long) from->si_addr,
-					  &to->si_addr);
-			break;
-		case SIL_POLL:
-			err |= __put_user(from->si_band, &to->si_band);
-			err |= __put_user(from->si_fd, &to->si_fd);
-			break;
-		case SIL_TIMER:
-			err |= __put_user(from->si_tid, &to->si_tid);
-			err |= __put_user(from->si_overrun, &to->si_overrun);
-			err |= __put_user(from->si_int, &to->si_int);
-			break;
-		default:
-			break;
-		}
-	}
-	return err ? -EFAULT : 0;
-}
-
-int copy_siginfo_from_user32(siginfo_t *to, compat_siginfo_t __user *from)
-{
-	int err;
-	u32 tmp;
-
-	err = __get_user(to->si_signo, &from->si_signo);
-	err |= __get_user(to->si_errno, &from->si_errno);
-	err |= __get_user(to->si_code, &from->si_code);
-
-	if (to->si_code < 0)
-		err |= __copy_from_user(&to->_sifields._pad, &from->_sifields._pad, SI_PAD_SIZE);
-	else {
-		switch (siginfo_layout(to->si_signo, to->si_code)) {
-		case SIL_RT:
-			err |= __get_user(to->si_int, &from->si_int);
-			/* fallthrough */
-		case SIL_KILL:
-			err |= __get_user(to->si_pid, &from->si_pid);
-			err |= __get_user(to->si_uid, &from->si_uid);
-			break;
-		case SIL_CHLD:
-			err |= __get_user(to->si_pid, &from->si_pid);
-			err |= __get_user(to->si_uid, &from->si_uid);
-			err |= __get_user(to->si_utime, &from->si_utime);
-			err |= __get_user(to->si_stime, &from->si_stime);
-			err |= __get_user(to->si_status, &from->si_status);
-			break;
-		case SIL_FAULT:
-			err |= __get_user(tmp, &from->si_addr);
-			to->si_addr = (void __force __user *)
-				(u64) (tmp & PSW32_ADDR_INSN);
-			break;
-		case SIL_POLL:
-			err |= __get_user(to->si_band, &from->si_band);
-			err |= __get_user(to->si_fd, &from->si_fd);
-			break;
-		case SIL_TIMER:
-			err |= __get_user(to->si_tid, &from->si_tid);
-			err |= __get_user(to->si_overrun, &from->si_overrun);
-			err |= __get_user(to->si_int, &from->si_int);
-			break;
-		default:
-			break;
-		}
-	}
-	return err ? -EFAULT : 0;
-}
-
 /* Store registers needed to create the signal frame */
 static void store_sigregs(void)
 {
 	save_access_regs(current->thread.acrs);
-	save_fpu_regs();
+	save_user_fpu_regs();
 }
 
 /* Load registers after signal return */
@@ -189,7 +79,7 @@ static int save_sigregs32(struct pt_regs *regs, _sigregs32 __user *sregs)
 		user_sregs.regs.gprs[i] = (__u32) regs->gprs[i];
 	memcpy(&user_sregs.regs.acrs, current->thread.acrs,
 	       sizeof(user_sregs.regs.acrs));
-	fpregs_store((_s390_fp_regs *) &user_sregs.fpregs, &current->thread.fpu);
+	fpregs_store((_s390_fp_regs *) &user_sregs.fpregs, &current->thread.ufpu);
 	if (__copy_to_user(sregs, &user_sregs, sizeof(_sigregs32)))
 		return -EFAULT;
 	return 0;
@@ -200,17 +90,13 @@ static int restore_sigregs32(struct pt_regs *regs,_sigregs32 __user *sregs)
 	_sigregs32 user_sregs;
 	int i;
 
-	/* Alwys make any pending restarted system call return -EINTR */
+	/* Always make any pending restarted system call return -EINTR */
 	current->restart_block.fn = do_no_restart_syscall;
 
 	if (__copy_from_user(&user_sregs, &sregs->regs, sizeof(user_sregs)))
 		return -EFAULT;
 
 	if (!is_ri_task(current) && (user_sregs.regs.psw.mask & PSW32_MASK_RI))
-		return -EINVAL;
-
-	/* Test the floating-point-control word. */
-	if (test_fp_ctl(user_sregs.fpregs.fpc))
 		return -EINVAL;
 
 	/* Use regs->psw.mask instead of PSW_USER_BITS to preserve PER bit. */
@@ -227,7 +113,7 @@ static int restore_sigregs32(struct pt_regs *regs,_sigregs32 __user *sregs)
 		regs->gprs[i] = (__u64) user_sregs.regs.gprs[i];
 	memcpy(&current->thread.acrs, &user_sregs.regs.acrs,
 	       sizeof(current->thread.acrs));
-	fpregs_load((_s390_fp_regs *) &user_sregs.fpregs, &current->thread.fpu);
+	fpregs_load((_s390_fp_regs *)&user_sregs.fpregs, &current->thread.ufpu);
 
 	clear_pt_regs_flag(regs, PIF_SYSCALL); /* No longer in a system call */
 	return 0;
@@ -248,13 +134,13 @@ static int save_sigregs_ext32(struct pt_regs *regs,
 		return -EFAULT;
 
 	/* Save vector registers to signal stack */
-	if (MACHINE_HAS_VX) {
+	if (cpu_has_vx()) {
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			vxrs[i] = *((__u64 *)(current->thread.fpu.vxrs + i) + 1);
+			vxrs[i] = current->thread.ufpu.vxrs[i].low;
 		if (__copy_to_user(&sregs_ext->vxrs_low, vxrs,
 				   sizeof(sregs_ext->vxrs_low)) ||
 		    __copy_to_user(&sregs_ext->vxrs_high,
-				   current->thread.fpu.vxrs + __NUM_VXRS_LOW,
+				   current->thread.ufpu.vxrs + __NUM_VXRS_LOW,
 				   sizeof(sregs_ext->vxrs_high)))
 			return -EFAULT;
 	}
@@ -276,15 +162,15 @@ static int restore_sigregs_ext32(struct pt_regs *regs,
 		*(__u32 *)&regs->gprs[i] = gprs_high[i];
 
 	/* Restore vector registers from signal stack */
-	if (MACHINE_HAS_VX) {
+	if (cpu_has_vx()) {
 		if (__copy_from_user(vxrs, &sregs_ext->vxrs_low,
 				     sizeof(sregs_ext->vxrs_low)) ||
-		    __copy_from_user(current->thread.fpu.vxrs + __NUM_VXRS_LOW,
+		    __copy_from_user(current->thread.ufpu.vxrs + __NUM_VXRS_LOW,
 				     &sregs_ext->vxrs_high,
 				     sizeof(sregs_ext->vxrs_high)))
 			return -EFAULT;
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			*((__u64 *)(current->thread.fpu.vxrs + i) + 1) = vxrs[i];
+			current->thread.ufpu.vxrs[i].low = vxrs[i];
 	}
 	return 0;
 }
@@ -293,14 +179,12 @@ COMPAT_SYSCALL_DEFINE0(sigreturn)
 {
 	struct pt_regs *regs = task_pt_regs(current);
 	sigframe32 __user *frame = (sigframe32 __user *)regs->gprs[15];
-	compat_sigset_t cset;
 	sigset_t set;
 
-	if (__copy_from_user(&cset.sig, &frame->sc.oldmask, _SIGMASK_COPY_SIZE32))
+	if (get_compat_sigset(&set, (compat_sigset_t __user *)frame->sc.oldmask))
 		goto badframe;
-	sigset32_to_sigset(cset.sig, set.sig);
 	set_current_blocked(&set);
-	save_fpu_regs();
+	save_user_fpu_regs();
 	if (restore_sigregs32(regs, &frame->sregs))
 		goto badframe;
 	if (restore_sigregs_ext32(regs, &frame->sregs_ext))
@@ -308,7 +192,7 @@ COMPAT_SYSCALL_DEFINE0(sigreturn)
 	load_sigregs();
 	return regs->gprs[2];
 badframe:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }
 
@@ -316,16 +200,14 @@ COMPAT_SYSCALL_DEFINE0(rt_sigreturn)
 {
 	struct pt_regs *regs = task_pt_regs(current);
 	rt_sigframe32 __user *frame = (rt_sigframe32 __user *)regs->gprs[15];
-	compat_sigset_t cset;
 	sigset_t set;
 
-	if (__copy_from_user(&cset, &frame->uc.uc_sigmask, sizeof(cset)))
+	if (get_compat_sigset(&set, &frame->uc.uc_sigmask))
 		goto badframe;
-	sigset32_to_sigset(cset.sig, set.sig);
 	set_current_blocked(&set);
 	if (compat_restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
-	save_fpu_regs();
+	save_user_fpu_regs();
 	if (restore_sigregs32(regs, &frame->uc.uc_mcontext))
 		goto badframe;
 	if (restore_sigregs_ext32(regs, &frame->uc.uc_mcontext_ext))
@@ -333,7 +215,7 @@ COMPAT_SYSCALL_DEFINE0(rt_sigreturn)
 	load_sigregs();
 	return regs->gprs[2];
 badframe:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }	
 
@@ -371,7 +253,6 @@ static int setup_frame32(struct ksignal *ksig, sigset_t *set,
 {
 	int sig = ksig->sig;
 	sigframe32 __user *frame;
-	struct sigcontext32 sc;
 	unsigned long restorer;
 	size_t frame_size;
 
@@ -381,7 +262,7 @@ static int setup_frame32(struct ksignal *ksig, sigset_t *set,
 	 * the machine supports it
 	 */
 	frame_size = sizeof(*frame) - sizeof(frame->sregs_ext.__reserved);
-	if (!MACHINE_HAS_VX)
+	if (!cpu_has_vx())
 		frame_size -= sizeof(frame->sregs_ext.vxrs_low) +
 			      sizeof(frame->sregs_ext.vxrs_high);
 	frame = get_sigframe(&ksig->ka, regs, frame_size);
@@ -393,9 +274,10 @@ static int setup_frame32(struct ksignal *ksig, sigset_t *set,
 		return -EFAULT;
 
 	/* Create struct sigcontext32 on the signal stack */
-	sigset_to_sigset32(set->sig, sc.oldmask);
-	sc.sregs = (__u32)(unsigned long __force) &frame->sregs;
-	if (__copy_to_user(&frame->sc, &sc, sizeof(frame->sc)))
+	if (put_compat_sigset((compat_sigset_t __user *)frame->sc.oldmask,
+			      set, sizeof(compat_sigset_t)))
+		return -EFAULT;
+	if (__put_user(ptr_to_compat(&frame->sregs), &frame->sc.sregs))
 		return -EFAULT;
 
 	/* Store registers needed to create the signal frame */
@@ -419,11 +301,7 @@ static int setup_frame32(struct ksignal *ksig, sigset_t *set,
 		restorer = (unsigned long __force)
 			ksig->ka.sa.sa_restorer | PSW32_ADDR_AMODE;
 	} else {
-		/* Signal frames without vectors registers are short ! */
-		__u16 __user *svc = (void __user *) frame + frame_size - 2;
-		if (__put_user(S390_SYSCALL_OPCODE | __NR_sigreturn, svc))
-			return -EFAULT;
-		restorer = (unsigned long __force) svc | PSW32_ADDR_AMODE;
+		restorer = VDSO32_SYMBOL(current, sigreturn);
         }
 
 	/* Set up registers for signal handler */
@@ -454,7 +332,6 @@ static int setup_frame32(struct ksignal *ksig, sigset_t *set,
 static int setup_rt_frame32(struct ksignal *ksig, sigset_t *set,
 			    struct pt_regs *regs)
 {
-	compat_sigset_t cset;
 	rt_sigframe32 __user *frame;
 	unsigned long restorer;
 	size_t frame_size;
@@ -468,11 +345,12 @@ static int setup_rt_frame32(struct ksignal *ksig, sigset_t *set,
 	 * the machine supports it
 	 */
 	uc_flags = UC_GPRS_HIGH;
-	if (MACHINE_HAS_VX) {
+	if (cpu_has_vx()) {
 		uc_flags |= UC_VXRS;
-	} else
+	} else {
 		frame_size -= sizeof(frame->uc.uc_mcontext_ext.vxrs_low) +
 			      sizeof(frame->uc.uc_mcontext_ext.vxrs_high);
+	}
 	frame = get_sigframe(&ksig->ka, regs, frame_size);
 	if (frame == (void __user *) -1UL)
 		return -EFAULT;
@@ -487,10 +365,7 @@ static int setup_rt_frame32(struct ksignal *ksig, sigset_t *set,
 		restorer = (unsigned long __force)
 			ksig->ka.sa.sa_restorer | PSW32_ADDR_AMODE;
 	} else {
-		__u16 __user *svc = &frame->svc_insn;
-		if (__put_user(S390_SYSCALL_OPCODE | __NR_rt_sigreturn, svc))
-			return -EFAULT;
-		restorer = (unsigned long __force) svc | PSW32_ADDR_AMODE;
+		restorer = VDSO32_SYMBOL(current, rt_sigreturn);
 	}
 
 	/* Create siginfo on the signal stack */
@@ -501,12 +376,11 @@ static int setup_rt_frame32(struct ksignal *ksig, sigset_t *set,
 	store_sigregs();
 
 	/* Create ucontext on the signal stack. */
-	sigset_to_sigset32(set->sig, cset.sig);
 	if (__put_user(uc_flags, &frame->uc.uc_flags) ||
 	    __put_user(0, &frame->uc.uc_link) ||
 	    __compat_save_altstack(&frame->uc.uc_stack, regs->gprs[15]) ||
 	    save_sigregs32(regs, &frame->uc.uc_mcontext) ||
-	    __copy_to_user(&frame->uc.uc_sigmask, &cset, sizeof(cset)) ||
+	    put_compat_sigset(&frame->uc.uc_sigmask, set, sizeof(compat_sigset_t)) ||
 	    save_sigregs_ext32(regs, &frame->uc.uc_mcontext_ext))
 		return -EFAULT;
 

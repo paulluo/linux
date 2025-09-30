@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * USB Compaq iPAQ driver
  *
  *	Copyright (C) 2001 - 2002
  *	    Ganesh Varadarajan <ganesh@veritas.com>
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -500,7 +496,6 @@ MODULE_DEVICE_TABLE(usb, ipaq_id_table);
 /* All of the device info needed for the Compaq iPAQ */
 static struct usb_serial_driver ipaq_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"ipaq",
 	},
 	.description =		"PocketPC PDA",
@@ -603,10 +598,10 @@ MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-module_param(connect_retries, int, S_IRUGO|S_IWUSR);
+module_param(connect_retries, int, 0644);
 MODULE_PARM_DESC(connect_retries,
 		"Maximum number of connect retries (one second each)");
 
-module_param(initial_wait, int, S_IRUGO|S_IWUSR);
+module_param(initial_wait, int, 0644);
 MODULE_PARM_DESC(initial_wait,
 		"Time to wait before attempting a connection (in seconds)");

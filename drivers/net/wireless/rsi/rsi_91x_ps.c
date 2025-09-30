@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2014 Redpine Signals Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
@@ -16,7 +16,6 @@
 
 #include <linux/etherdevice.h>
 #include <linux/if.h>
-#include <linux/version.h>
 #include "rsi_debugfs.h"
 #include "rsi_mgmt.h"
 #include "rsi_common.h"
@@ -36,7 +35,6 @@ char *str_psstate(enum ps_state state)
 	default:
 		return "INVALID_STATE";
 	}
-	return "INVALID_STATE";
 }
 
 static inline void rsi_modify_ps_state(struct rsi_hw *adapter,
@@ -67,7 +65,7 @@ void rsi_default_ps_params(struct rsi_hw *adapter)
 	ps_info->deep_sleep_wakeup_period = RSI_DEF_DS_WAKEUP_PERIOD;
 }
 
-void rsi_enable_ps(struct rsi_hw *adapter)
+void rsi_enable_ps(struct rsi_hw *adapter, struct ieee80211_vif *vif)
 {
 	if (adapter->ps_state != PS_NONE) {
 		rsi_dbg(ERR_ZONE,
@@ -76,7 +74,7 @@ void rsi_enable_ps(struct rsi_hw *adapter)
 		return;
 	}
 
-	if (rsi_send_ps_request(adapter, true)) {
+	if (rsi_send_ps_request(adapter, true, vif)) {
 		rsi_dbg(ERR_ZONE,
 			"%s: Failed to send PS request to device\n",
 			__func__);
@@ -86,7 +84,8 @@ void rsi_enable_ps(struct rsi_hw *adapter)
 	rsi_modify_ps_state(adapter, PS_ENABLE_REQ_SENT);
 }
 
-void rsi_disable_ps(struct rsi_hw *adapter)
+/* This function is used to disable power save */
+void rsi_disable_ps(struct rsi_hw *adapter, struct ieee80211_vif *vif)
 {
 	if (adapter->ps_state != PS_ENABLED) {
 		rsi_dbg(ERR_ZONE,
@@ -95,7 +94,7 @@ void rsi_disable_ps(struct rsi_hw *adapter)
 		return;
 	}
 
-	if (rsi_send_ps_request(adapter, false)) {
+	if (rsi_send_ps_request(adapter, false, vif)) {
 		rsi_dbg(ERR_ZONE,
 			"%s: Failed to send PS request to device\n",
 			__func__);
@@ -105,16 +104,16 @@ void rsi_disable_ps(struct rsi_hw *adapter)
 	rsi_modify_ps_state(adapter, PS_DISABLE_REQ_SENT);
 }
 
-void rsi_conf_uapsd(struct rsi_hw *adapter)
+void rsi_conf_uapsd(struct rsi_hw *adapter, struct ieee80211_vif *vif)
 {
 	int ret;
 
 	if (adapter->ps_state != PS_ENABLED)
 		return;
 
-	ret = rsi_send_ps_request(adapter, false);
+	ret = rsi_send_ps_request(adapter, false, vif);
 	if (!ret)
-		ret = rsi_send_ps_request(adapter, true);
+		ret = rsi_send_ps_request(adapter, true, vif);
 	if (ret)
 		rsi_dbg(ERR_ZONE,
 			"%s: Failed to send PS request to device\n",

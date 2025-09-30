@@ -1,11 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
 sti-drm-y := \
 	sti_mixer.o \
 	sti_gdp.o \
 	sti_vid.o \
 	sti_cursor.o \
 	sti_compositor.o \
-	sti_crtc.o \
-	sti_plane.o \
 	sti_crtc.o \
 	sti_plane.o \
 	sti_hdmi.o \

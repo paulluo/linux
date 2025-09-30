@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* checksum.S: Sparc V9 optimized checksum code.
  *
  *  Copyright(C) 1995 Linus Torvalds
@@ -13,7 +14,7 @@
  *	BSD4.4 portable checksum routine
  */
 
-#include <asm/export.h>
+#include <linux/export.h>
 	.text
 
 csum_partial_fix_alignment:

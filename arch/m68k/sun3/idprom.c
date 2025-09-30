@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * idprom.c: Routines to load the idprom into kernel addresses and
  *           interpret the data contained within.
@@ -15,6 +16,8 @@
 #include <asm/oplib.h>
 #include <asm/idprom.h>
 #include <asm/machines.h>  /* Fun with Sun released architectures. */
+
+#include "sun3.h"
 
 struct idprom *idprom;
 EXPORT_SYMBOL(idprom);
@@ -82,7 +85,7 @@ static void __init display_system_type(unsigned char machtype)
 	prom_halt();
 }
 
-void sun3_get_model(unsigned char* model)
+void sun3_get_model(char *model)
 {
 	register int i;
 

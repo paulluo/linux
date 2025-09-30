@@ -38,7 +38,7 @@
 #include <linux/netdevice.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/io.h>
 
 #include "arcdevice.h"
@@ -137,6 +137,7 @@ module_param(backplane, int, 0);
 module_param(clockp, int, 0);
 module_param(clockm, int, 0);
 
+MODULE_DESCRIPTION("ARCnet COM20020 chipset ISA driver");
 MODULE_LICENSE("GPL");
 
 static struct net_device *my_dev;
@@ -151,7 +152,7 @@ static int __init com20020_init(void)
 		return -ENOMEM;
 
 	if (node && node != 0xff)
-		dev->dev_addr[0] = node;
+		arcnet_set_addr(dev, node);
 
 	dev->netdev_ops = &com20020_netdev_ops;
 
@@ -169,7 +170,7 @@ static int __init com20020_init(void)
 		dev->irq = 9;
 
 	if (com20020isa_probe(dev)) {
-		free_netdev(dev);
+		free_arcdev(dev);
 		return -EIO;
 	}
 
@@ -182,7 +183,7 @@ static void __exit com20020_exit(void)
 	unregister_netdev(my_dev);
 	free_irq(my_dev->irq, my_dev);
 	release_region(my_dev->base_addr, ARCNET_TOTAL_SIZE);
-	free_netdev(my_dev);
+	free_arcdev(my_dev);
 }
 
 #ifndef MODULE
@@ -197,16 +198,22 @@ static int __init com20020isa_setup(char *s)
 	switch (ints[0]) {
 	default:		/* ERROR */
 		pr_info("Too many arguments\n");
+		fallthrough;
 	case 6:		/* Timeout */
 		timeout = ints[6];
+		fallthrough;
 	case 5:		/* CKP value */
 		clockp = ints[5];
+		fallthrough;
 	case 4:		/* Backplane flag */
 		backplane = ints[4];
+		fallthrough;
 	case 3:		/* Node ID */
 		node = ints[3];
+		fallthrough;
 	case 2:		/* IRQ */
 		irq = ints[2];
+		fallthrough;
 	case 1:		/* IO address */
 		io = ints[1];
 	}

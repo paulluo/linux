@@ -75,6 +75,7 @@
 #include <linux/tcp.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/slab.h>
 #include <linux/prefetch.h>
 #include <net/tcp.h>
@@ -337,12 +338,6 @@ static const char ethtool_driver_stats_keys[][ETH_GSTRING_LEN] = {
 #define S2IO_TEST_LEN	ARRAY_SIZE(s2io_gstrings)
 #define S2IO_STRINGS_LEN	(S2IO_TEST_LEN * ETH_GSTRING_LEN)
 
-#define S2IO_TIMER_CONF(timer, handle, arg, exp)	\
-	init_timer(&timer);				\
-	timer.function = handle;			\
-	timer.data = (unsigned long)arg;		\
-	mod_timer(&timer, (jiffies + exp))		\
-
 /* copy mac addr to def_mac_addr array */
 static void do_s2io_copy_mac_addr(struct s2io_nic *sp, int offset, u64 mac_addr)
 {
@@ -419,6 +414,7 @@ static const u64 fix_mac[] = {
 	END_SIGN
 };
 
+MODULE_DESCRIPTION("Neterion 10GbE driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
 
@@ -497,7 +493,7 @@ static struct pci_driver s2io_driver = {
 };
 
 /* A simplifier macro used both by init and free shared_mem Fns(). */
-#define TXD_MEM_PAGE_CNT(len, per_each) ((len+per_each - 1) / per_each)
+#define TXD_MEM_PAGE_CNT(len, per_each) DIV_ROUND_UP(len, per_each)
 
 /* netqueue manipulation helper functions */
 static inline void s2io_stop_all_tx_queue(struct s2io_nic *sp)
@@ -645,11 +641,11 @@ static int init_shared_mem(struct s2io_nic *nic)
 			int k = 0;
 			dma_addr_t tmp_p;
 			void *tmp_v;
-			tmp_v = pci_alloc_consistent(nic->pdev,
-						     PAGE_SIZE, &tmp_p);
+			tmp_v = dma_alloc_coherent(&nic->pdev->dev, PAGE_SIZE,
+						   &tmp_p, GFP_KERNEL);
 			if (!tmp_v) {
 				DBG_PRINT(INFO_DBG,
-					  "pci_alloc_consistent failed for TxDL\n");
+					  "dma_alloc_coherent failed for TxDL\n");
 				return -ENOMEM;
 			}
 			/* If we got a zero DMA address(can happen on
@@ -663,11 +659,12 @@ static int init_shared_mem(struct s2io_nic *nic)
 					  "%s: Zero DMA address for TxDL. "
 					  "Virtual address %p\n",
 					  dev->name, tmp_v);
-				tmp_v = pci_alloc_consistent(nic->pdev,
-							     PAGE_SIZE, &tmp_p);
+				tmp_v = dma_alloc_coherent(&nic->pdev->dev,
+							   PAGE_SIZE, &tmp_p,
+							   GFP_KERNEL);
 				if (!tmp_v) {
 					DBG_PRINT(INFO_DBG,
-						  "pci_alloc_consistent failed for TxDL\n");
+						  "dma_alloc_coherent failed for TxDL\n");
 					return -ENOMEM;
 				}
 				mem_allocated += PAGE_SIZE;
@@ -739,8 +736,8 @@ static int init_shared_mem(struct s2io_nic *nic)
 
 			rx_blocks = &ring->rx_blocks[j];
 			size = SIZE_OF_BLOCK;	/* size is always page size */
-			tmp_v_addr = pci_alloc_consistent(nic->pdev, size,
-							  &tmp_p_addr);
+			tmp_v_addr = dma_alloc_coherent(&nic->pdev->dev, size,
+							&tmp_p_addr, GFP_KERNEL);
 			if (tmp_v_addr == NULL) {
 				/*
 				 * In case of failure, free_shared_mem()
@@ -752,7 +749,6 @@ static int init_shared_mem(struct s2io_nic *nic)
 				return -ENOMEM;
 			}
 			mem_allocated += size;
-			memset(tmp_v_addr, 0, size);
 
 			size = sizeof(struct rxd_info) *
 				rxd_count[nic->rxd_mode];
@@ -841,8 +837,8 @@ static int init_shared_mem(struct s2io_nic *nic)
 	/* Allocation and initialization of Statistics block */
 	size = sizeof(struct stat_block);
 	mac_control->stats_mem =
-		pci_alloc_consistent(nic->pdev, size,
-				     &mac_control->stats_mem_phy);
+		dma_alloc_coherent(&nic->pdev->dev, size,
+				   &mac_control->stats_mem_phy, GFP_KERNEL);
 
 	if (!mac_control->stats_mem) {
 		/*
@@ -912,18 +908,18 @@ static void free_shared_mem(struct s2io_nic *nic)
 			fli = &fifo->list_info[mem_blks];
 			if (!fli->list_virt_addr)
 				break;
-			pci_free_consistent(nic->pdev, PAGE_SIZE,
-					    fli->list_virt_addr,
-					    fli->list_phy_addr);
+			dma_free_coherent(&nic->pdev->dev, PAGE_SIZE,
+					  fli->list_virt_addr,
+					  fli->list_phy_addr);
 			swstats->mem_freed += PAGE_SIZE;
 		}
 		/* If we got a zero DMA address during allocation,
 		 * free the page now
 		 */
 		if (mac_control->zerodma_virt_addr) {
-			pci_free_consistent(nic->pdev, PAGE_SIZE,
-					    mac_control->zerodma_virt_addr,
-					    (dma_addr_t)0);
+			dma_free_coherent(&nic->pdev->dev, PAGE_SIZE,
+					  mac_control->zerodma_virt_addr,
+					  (dma_addr_t)0);
 			DBG_PRINT(INIT_DBG,
 				  "%s: Freeing TxDL with zero DMA address. "
 				  "Virtual address %p\n",
@@ -945,8 +941,8 @@ static void free_shared_mem(struct s2io_nic *nic)
 			tmp_p_addr = ring->rx_blocks[j].block_dma_addr;
 			if (tmp_v_addr == NULL)
 				break;
-			pci_free_consistent(nic->pdev, size,
-					    tmp_v_addr, tmp_p_addr);
+			dma_free_coherent(&nic->pdev->dev, size, tmp_v_addr,
+					  tmp_p_addr);
 			swstats->mem_freed += size;
 			kfree(ring->rx_blocks[j].rxds);
 			swstats->mem_freed += sizeof(struct rxd_info) *
@@ -999,14 +995,13 @@ static void free_shared_mem(struct s2io_nic *nic)
 
 	if (mac_control->stats_mem) {
 		swstats->mem_freed += mac_control->stats_mem_sz;
-		pci_free_consistent(nic->pdev,
-				    mac_control->stats_mem_sz,
-				    mac_control->stats_mem,
-				    mac_control->stats_mem_phy);
+		dma_free_coherent(&nic->pdev->dev, mac_control->stats_mem_sz,
+				  mac_control->stats_mem,
+				  mac_control->stats_mem_phy);
 	}
 }
 
-/**
+/*
  * s2io_verify_pci_mode -
  */
 
@@ -1041,7 +1036,7 @@ static int s2io_on_nec_bridge(struct pci_dev *s2io_pdev)
 }
 
 static int bus_speed[8] = {33, 133, 133, 200, 266, 133, 200, 266};
-/**
+/*
  * s2io_print_pci_mode -
  */
 static int s2io_print_pci_mode(struct s2io_nic *nic)
@@ -1107,12 +1102,14 @@ static int s2io_print_pci_mode(struct s2io_nic *nic)
  *  @nic: device private variable
  *  @link: link status (UP/DOWN) used to enable/disable continuous
  *  transmit interrupts
+ *  @may_sleep: parameter indicates if sleeping when waiting for
+ *  command complete
  *  Description: The function configures transmit traffic interrupts
  *  Return Value:  SUCCESS on success and
  *  '-1' on failure
  */
 
-static int init_tti(struct s2io_nic *nic, int link)
+static int init_tti(struct s2io_nic *nic, int link, bool may_sleep)
 {
 	struct XENA_dev_config __iomem *bar0 = nic->bar0;
 	register u64 val64 = 0;
@@ -1172,7 +1169,7 @@ static int init_tti(struct s2io_nic *nic, int link)
 
 		if (wait_for_cmd_complete(&bar0->tti_command_mem,
 					  TTI_CMD_MEM_STROBE_NEW_CMD,
-					  S2IO_BIT_RESET) != SUCCESS)
+					  S2IO_BIT_RESET, may_sleep) != SUCCESS)
 			return FAILURE;
 	}
 
@@ -1665,7 +1662,7 @@ static int init_nic(struct s2io_nic *nic)
 	 */
 
 	/* Initialize TTI */
-	if (SUCCESS != init_tti(nic, nic->last_link_state))
+	if (SUCCESS != init_tti(nic, nic->last_link_state, true))
 		return -ENODEV;
 
 	/* RTI Initialization */
@@ -2070,6 +2067,9 @@ static void en_dis_able_nic_intrs(struct s2io_nic *nic, u16 mask, int flag)
 
 /**
  *  verify_pcc_quiescent- Checks for PCC quiescent state
+ *  @sp : private member of the device structure, which is a pointer to the
+ *  s2io_nic structure.
+ *  @flag: boolean controlling function path
  *  Return: 1 If PCC is quiescence
  *          0 If PCC is not quiescence
  */
@@ -2105,6 +2105,8 @@ static int verify_pcc_quiescent(struct s2io_nic *sp, int flag)
 }
 /**
  *  verify_xena_quiescence - Checks whether the H/W is ready
+ *  @sp : private member of the device structure, which is a pointer to the
+ *  s2io_nic structure.
  *  Description: Returns whether the H/W is ready to go or not. Depending
  *  on whether adapter enable bit was written or not the comparison
  *  differs and the calling function passes the input argument flag to
@@ -2155,7 +2157,7 @@ static int verify_xena_quiescence(struct s2io_nic *sp)
 
 	/*
 	 * In PCI 33 mode, the P_PLL is not used, and therefore,
-	 * the the P_PLL_LOCK bit in the adapter_status register will
+	 * the P_PLL_LOCK bit in the adapter_status register will
 	 * not be asserted.
 	 */
 	if (!(val64 & ADAPTER_STATUS_P_PLL_LOCK) &&
@@ -2311,6 +2313,9 @@ static int start_nic(struct s2io_nic *nic)
 }
 /**
  * s2io_txdl_getskb - Get the skb from txdl, unmap and return skb
+ * @fifo_data: fifo data pointer
+ * @txdlp: descriptor
+ * @get_off: unused
  */
 static struct sk_buff *s2io_txdl_getskb(struct fifo_info *fifo_data,
 					struct TxD *txdlp, int get_off)
@@ -2322,8 +2327,9 @@ static struct sk_buff *s2io_txdl_getskb(struct fifo_info *fifo_data,
 
 	txds = txdlp;
 	if (txds->Host_Control == (u64)(long)fifo_data->ufo_in_band_v) {
-		pci_unmap_single(nic->pdev, (dma_addr_t)txds->Buffer_Pointer,
-				 sizeof(u64), PCI_DMA_TODEVICE);
+		dma_unmap_single(&nic->pdev->dev,
+				 (dma_addr_t)txds->Buffer_Pointer,
+				 sizeof(u64), DMA_TO_DEVICE);
 		txds++;
 	}
 
@@ -2332,8 +2338,8 @@ static struct sk_buff *s2io_txdl_getskb(struct fifo_info *fifo_data,
 		memset(txdlp, 0, (sizeof(struct TxD) * fifo_data->max_txds));
 		return NULL;
 	}
-	pci_unmap_single(nic->pdev, (dma_addr_t)txds->Buffer_Pointer,
-			 skb_headlen(skb), PCI_DMA_TODEVICE);
+	dma_unmap_single(&nic->pdev->dev, (dma_addr_t)txds->Buffer_Pointer,
+			 skb_headlen(skb), DMA_TO_DEVICE);
 	frg_cnt = skb_shinfo(skb)->nr_frags;
 	if (frg_cnt) {
 		txds++;
@@ -2341,9 +2347,9 @@ static struct sk_buff *s2io_txdl_getskb(struct fifo_info *fifo_data,
 			const skb_frag_t *frag = &skb_shinfo(skb)->frags[j];
 			if (!txds->Buffer_Pointer)
 				break;
-			pci_unmap_page(nic->pdev,
+			dma_unmap_page(&nic->pdev->dev,
 				       (dma_addr_t)txds->Buffer_Pointer,
-				       skb_frag_size(frag), PCI_DMA_TODEVICE);
+				       skb_frag_size(frag), DMA_TO_DEVICE);
 		}
 	}
 	memset(txdlp, 0, (sizeof(struct TxD) * fifo_data->max_txds));
@@ -2381,7 +2387,7 @@ static void free_tx_buffers(struct s2io_nic *nic)
 			skb = s2io_txdl_getskb(&mac_control->fifos[i], txdp, j);
 			if (skb) {
 				swstats->mem_freed += skb->truesize;
-				dev_kfree_skb(skb);
+				dev_kfree_skb_irq(skb);
 				cnt++;
 			}
 		}
@@ -2396,7 +2402,7 @@ static void free_tx_buffers(struct s2io_nic *nic)
 
 /**
  *   stop_nic -  To stop the nic
- *   @nic ; device private variable.
+ *   @nic : device private variable.
  *   Description:
  *   This function does exactly the opposite of what the start_nic()
  *   function does. This function is called to stop the device.
@@ -2424,7 +2430,8 @@ static void stop_nic(struct s2io_nic *nic)
 
 /**
  *  fill_rx_buffers - Allocates the Rx side skbs
- *  @ring_info: per ring structure
+ *  @nic : device private variable.
+ *  @ring: per ring structure
  *  @from_card_up: If this is true, we will map the buffer to get
  *     the dma address for buf0 and buf1 to give it to the card.
  *     Else we will sync the already mapped buffer to give it to the card.
@@ -2527,11 +2534,10 @@ static int fill_rx_buffers(struct s2io_nic *nic, struct ring_info *ring,
 			memset(rxdp, 0, sizeof(struct RxD1));
 			skb_reserve(skb, NET_IP_ALIGN);
 			rxdp1->Buffer0_ptr =
-				pci_map_single(ring->pdev, skb->data,
+				dma_map_single(&ring->pdev->dev, skb->data,
 					       size - NET_IP_ALIGN,
-					       PCI_DMA_FROMDEVICE);
-			if (pci_dma_mapping_error(nic->pdev,
-						  rxdp1->Buffer0_ptr))
+					       DMA_FROM_DEVICE);
+			if (dma_mapping_error(&nic->pdev->dev, rxdp1->Buffer0_ptr))
 				goto pci_map_failed;
 
 			rxdp->Control_2 =
@@ -2563,17 +2569,16 @@ static int fill_rx_buffers(struct s2io_nic *nic, struct ring_info *ring,
 
 			if (from_card_up) {
 				rxdp3->Buffer0_ptr =
-					pci_map_single(ring->pdev, ba->ba_0,
-						       BUF0_LEN,
-						       PCI_DMA_FROMDEVICE);
-				if (pci_dma_mapping_error(nic->pdev,
-							  rxdp3->Buffer0_ptr))
+					dma_map_single(&ring->pdev->dev,
+						       ba->ba_0, BUF0_LEN,
+						       DMA_FROM_DEVICE);
+				if (dma_mapping_error(&nic->pdev->dev, rxdp3->Buffer0_ptr))
 					goto pci_map_failed;
 			} else
-				pci_dma_sync_single_for_device(ring->pdev,
-							       (dma_addr_t)rxdp3->Buffer0_ptr,
-							       BUF0_LEN,
-							       PCI_DMA_FROMDEVICE);
+				dma_sync_single_for_device(&ring->pdev->dev,
+							   (dma_addr_t)rxdp3->Buffer0_ptr,
+							   BUF0_LEN,
+							   DMA_FROM_DEVICE);
 
 			rxdp->Control_2 = SET_BUFFER0_SIZE_3(BUF0_LEN);
 			if (ring->rxd_mode == RXD_MODE_3B) {
@@ -2583,29 +2588,28 @@ static int fill_rx_buffers(struct s2io_nic *nic, struct ring_info *ring,
 				 * Buffer2 will have L3/L4 header plus
 				 * L4 payload
 				 */
-				rxdp3->Buffer2_ptr = pci_map_single(ring->pdev,
+				rxdp3->Buffer2_ptr = dma_map_single(&ring->pdev->dev,
 								    skb->data,
 								    ring->mtu + 4,
-								    PCI_DMA_FROMDEVICE);
+								    DMA_FROM_DEVICE);
 
-				if (pci_dma_mapping_error(nic->pdev,
-							  rxdp3->Buffer2_ptr))
+				if (dma_mapping_error(&nic->pdev->dev, rxdp3->Buffer2_ptr))
 					goto pci_map_failed;
 
 				if (from_card_up) {
 					rxdp3->Buffer1_ptr =
-						pci_map_single(ring->pdev,
+						dma_map_single(&ring->pdev->dev,
 							       ba->ba_1,
 							       BUF1_LEN,
-							       PCI_DMA_FROMDEVICE);
+							       DMA_FROM_DEVICE);
 
-					if (pci_dma_mapping_error(nic->pdev,
-								  rxdp3->Buffer1_ptr)) {
-						pci_unmap_single(ring->pdev,
+					if (dma_mapping_error(&nic->pdev->dev,
+							      rxdp3->Buffer1_ptr)) {
+						dma_unmap_single(&ring->pdev->dev,
 								 (dma_addr_t)(unsigned long)
 								 skb->data,
 								 ring->mtu + 4,
-								 PCI_DMA_FROMDEVICE);
+								 DMA_FROM_DEVICE);
 						goto pci_map_failed;
 					}
 				}
@@ -2674,27 +2678,24 @@ static void free_rxd_blk(struct s2io_nic *sp, int ring_no, int blk)
 			continue;
 		if (sp->rxd_mode == RXD_MODE_1) {
 			rxdp1 = (struct RxD1 *)rxdp;
-			pci_unmap_single(sp->pdev,
+			dma_unmap_single(&sp->pdev->dev,
 					 (dma_addr_t)rxdp1->Buffer0_ptr,
 					 dev->mtu +
 					 HEADER_ETHERNET_II_802_3_SIZE +
 					 HEADER_802_2_SIZE + HEADER_SNAP_SIZE,
-					 PCI_DMA_FROMDEVICE);
+					 DMA_FROM_DEVICE);
 			memset(rxdp, 0, sizeof(struct RxD1));
 		} else if (sp->rxd_mode == RXD_MODE_3B) {
 			rxdp3 = (struct RxD3 *)rxdp;
-			pci_unmap_single(sp->pdev,
+			dma_unmap_single(&sp->pdev->dev,
 					 (dma_addr_t)rxdp3->Buffer0_ptr,
-					 BUF0_LEN,
-					 PCI_DMA_FROMDEVICE);
-			pci_unmap_single(sp->pdev,
+					 BUF0_LEN, DMA_FROM_DEVICE);
+			dma_unmap_single(&sp->pdev->dev,
 					 (dma_addr_t)rxdp3->Buffer1_ptr,
-					 BUF1_LEN,
-					 PCI_DMA_FROMDEVICE);
-			pci_unmap_single(sp->pdev,
+					 BUF1_LEN, DMA_FROM_DEVICE);
+			dma_unmap_single(&sp->pdev->dev,
 					 (dma_addr_t)rxdp3->Buffer2_ptr,
-					 dev->mtu + 4,
-					 PCI_DMA_FROMDEVICE);
+					 dev->mtu + 4, DMA_FROM_DEVICE);
 			memset(rxdp, 0, sizeof(struct RxD3));
 		}
 		swstats->mem_freed += skb->truesize;
@@ -2745,7 +2746,7 @@ static int s2io_chk_rx_buffers(struct s2io_nic *nic, struct ring_info *ring)
 }
 
 /**
- * s2io_poll - Rx interrupt handler for NAPI support
+ * s2io_poll_msix - Rx interrupt handler for NAPI support
  * @napi : pointer to the napi structure.
  * @budget : The number of packets that were budgeted to be processed
  * during  one pass through the 'Poll" function.
@@ -2875,7 +2876,7 @@ static void s2io_netpoll(struct net_device *dev)
 
 /**
  *  rx_intr_handler - Rx interrupt handler
- *  @ring_info: per ring structure.
+ *  @ring_data: per ring structure.
  *  @budget: budget for napi processing.
  *  Description:
  *  If the interrupt is because of a received frame or if the
@@ -2925,23 +2926,21 @@ static int rx_intr_handler(struct ring_info *ring_data, int budget)
 		}
 		if (ring_data->rxd_mode == RXD_MODE_1) {
 			rxdp1 = (struct RxD1 *)rxdp;
-			pci_unmap_single(ring_data->pdev, (dma_addr_t)
-					 rxdp1->Buffer0_ptr,
+			dma_unmap_single(&ring_data->pdev->dev,
+					 (dma_addr_t)rxdp1->Buffer0_ptr,
 					 ring_data->mtu +
 					 HEADER_ETHERNET_II_802_3_SIZE +
 					 HEADER_802_2_SIZE +
 					 HEADER_SNAP_SIZE,
-					 PCI_DMA_FROMDEVICE);
+					 DMA_FROM_DEVICE);
 		} else if (ring_data->rxd_mode == RXD_MODE_3B) {
 			rxdp3 = (struct RxD3 *)rxdp;
-			pci_dma_sync_single_for_cpu(ring_data->pdev,
-						    (dma_addr_t)rxdp3->Buffer0_ptr,
-						    BUF0_LEN,
-						    PCI_DMA_FROMDEVICE);
-			pci_unmap_single(ring_data->pdev,
+			dma_sync_single_for_cpu(&ring_data->pdev->dev,
+						(dma_addr_t)rxdp3->Buffer0_ptr,
+						BUF0_LEN, DMA_FROM_DEVICE);
+			dma_unmap_single(&ring_data->pdev->dev,
 					 (dma_addr_t)rxdp3->Buffer2_ptr,
-					 ring_data->mtu + 4,
-					 PCI_DMA_FROMDEVICE);
+					 ring_data->mtu + 4, DMA_FROM_DEVICE);
 		}
 		prefetch(skb->data);
 		rx_osm_handler(ring_data, rxdp);
@@ -2985,7 +2984,7 @@ static int rx_intr_handler(struct ring_info *ring_data, int budget)
 
 /**
  *  tx_intr_handler - Transmit interrupt handler
- *  @nic : device private variable
+ *  @fifo_data : fifo data pointer
  *  Description:
  *  If an interrupt was raised to indicate DMA complete of the
  *  Tx packet, this function is called. It identifies the last TxD
@@ -3060,7 +3059,7 @@ static void tx_intr_handler(struct fifo_info *fifo_data)
 
 		/* Updating the statistics block */
 		swstats->mem_freed += skb->truesize;
-		dev_kfree_skb_irq(skb);
+		dev_consume_skb_irq(skb);
 
 		get_info.offset++;
 		if (get_info.offset == get_info.fifo_len + 1)
@@ -3166,6 +3165,8 @@ static u64 s2io_mdio_read(u32 mmd_type, u64 addr, struct net_device *dev)
 /**
  *  s2io_chk_xpak_counter - Function to check the status of the xpak counters
  *  @counter      : counter value to be updated
+ *  @regs_stat    : registers status
+ *  @index        : index
  *  @flag         : flag to indicate the status
  *  @type         : counter type
  *  Description:
@@ -3322,8 +3323,11 @@ static void s2io_updt_xpak_counter(struct net_device *dev)
 
 /**
  *  wait_for_cmd_complete - waits for a command to complete.
- *  @sp : private member of the device structure, which is a pointer to the
- *  s2io_nic structure.
+ *  @addr: address
+ *  @busy_bit: bit to check for busy
+ *  @bit_state: state to check
+ *  @may_sleep: parameter indicates if sleeping when waiting for
+ *  command complete
  *  Description: Function that waits for a command to Write into RMAC
  *  ADDR DATA registers to be completed and returns either success or
  *  error depending on whether the command was complete or not.
@@ -3332,7 +3336,7 @@ static void s2io_updt_xpak_counter(struct net_device *dev)
  */
 
 static int wait_for_cmd_complete(void __iomem *addr, u64 busy_bit,
-				 int bit_state)
+				 int bit_state, bool may_sleep)
 {
 	int ret = FAILURE, cnt = 0, delay = 1;
 	u64 val64;
@@ -3354,7 +3358,7 @@ static int wait_for_cmd_complete(void __iomem *addr, u64 busy_bit,
 			}
 		}
 
-		if (in_interrupt())
+		if (!may_sleep)
 			mdelay(delay);
 		else
 			msleep(delay);
@@ -3685,11 +3689,9 @@ static void restore_xmsi_data(struct s2io_nic *nic)
 		writeq(nic->msix_info[i].data, &bar0->xmsi_data);
 		val64 = (s2BIT(7) | s2BIT(15) | vBIT(msix_index, 26, 6));
 		writeq(val64, &bar0->xmsi_access);
-		if (wait_for_msix_trans(nic, msix_index)) {
+		if (wait_for_msix_trans(nic, msix_index))
 			DBG_PRINT(ERR_DBG, "%s: index: %d failed\n",
 				  __func__, msix_index);
-			continue;
-		}
 	}
 }
 
@@ -3816,7 +3818,7 @@ static irqreturn_t s2io_test_intr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-/* Test interrupt path by forcing a a software IRQ */
+/* Test interrupt path by forcing a software IRQ */
 static int s2io_test_msi(struct s2io_nic *sp)
 {
 	struct pci_dev *pdev = sp->pdev;
@@ -4125,9 +4127,9 @@ static netdev_tx_t s2io_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	frg_len = skb_headlen(skb);
-	txdp->Buffer_Pointer = pci_map_single(sp->pdev, skb->data,
-					      frg_len, PCI_DMA_TODEVICE);
-	if (pci_dma_mapping_error(sp->pdev, txdp->Buffer_Pointer))
+	txdp->Buffer_Pointer = dma_map_single(&sp->pdev->dev, skb->data,
+					      frg_len, DMA_TO_DEVICE);
+	if (dma_mapping_error(&sp->pdev->dev, txdp->Buffer_Pointer))
 		goto pci_map_failed;
 
 	txdp->Host_Control = (unsigned long)skb;
@@ -4160,8 +4162,6 @@ static netdev_tx_t s2io_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	writeq(val64, &tx_fifo->List_Control);
 
-	mmiowb();
-
 	put_off++;
 	if (put_off == fifo->tx_curr_put_info.fifo_len + 1)
 		put_off = 0;
@@ -4193,9 +4193,9 @@ pci_map_failed:
 }
 
 static void
-s2io_alarm_handle(unsigned long data)
+s2io_alarm_handle(struct timer_list *t)
 {
-	struct s2io_nic *sp = (struct s2io_nic *)data;
+	struct s2io_nic *sp = timer_container_of(sp, t, alarm_timer);
 	struct net_device *dev = sp->dev;
 
 	s2io_handle_errors(dev);
@@ -4352,7 +4352,7 @@ static int do_s2io_chk_alarm_bit(u64 value, void __iomem *addr,
 
 /**
  *  s2io_handle_errors - Xframe error indication handler
- *  @nic: device private variable
+ *  @dev_id: opaque handle to dev
  *  Description: Handle alarms such as loss of link, single or
  *  double ECC errors, critical and serious errors.
  *  Return Value:
@@ -4707,7 +4707,7 @@ static irqreturn_t s2io_isr(int irq, void *dev_id)
 			/*
 			 * rx_traffic_int reg is an R1 register, writing all 1's
 			 * will ensure that the actual interrupt causing bit
-			 * get's cleared and hence a read can be avoided.
+			 * gets cleared and hence a read can be avoided.
 			 */
 			if (reason & GEN_INTR_RXTRAFFIC)
 				writeq(S2IO_MINUS_ONE, &bar0->rx_traffic_int);
@@ -4721,7 +4721,7 @@ static irqreturn_t s2io_isr(int irq, void *dev_id)
 
 		/*
 		 * tx_traffic_int reg is an R1 register, writing all 1's
-		 * will ensure that the actual interrupt causing bit get's
+		 * will ensure that the actual interrupt causing bit gets
 		 * cleared and hence a read can be avoided.
 		 */
 		if (reason & GEN_INTR_TXTRAFFIC)
@@ -4756,7 +4756,7 @@ static irqreturn_t s2io_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-/**
+/*
  * s2io_updt_stats -
  */
 static void s2io_updt_stats(struct s2io_nic *sp)
@@ -4873,6 +4873,8 @@ static struct net_device_stats *s2io_get_stats(struct net_device *dev)
 /**
  *  s2io_set_multicast - entry point for multicast address enable/disable.
  *  @dev : pointer to the device structure
+ *  @may_sleep: parameter indicates if sleeping when waiting for command
+ *  complete
  *  Description:
  *  This function is a driver entry point which gets called by the kernel
  *  whenever multicast addresses must be enabled/disabled. This also gets
@@ -4882,8 +4884,7 @@ static struct net_device_stats *s2io_get_stats(struct net_device *dev)
  *  Return value:
  *  void.
  */
-
-static void s2io_set_multicast(struct net_device *dev)
+static void s2io_set_multicast(struct net_device *dev, bool may_sleep)
 {
 	int i, j, prev_cnt;
 	struct netdev_hw_addr *ha;
@@ -4908,7 +4909,7 @@ static void s2io_set_multicast(struct net_device *dev)
 		/* Wait till command completes */
 		wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 				      RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-				      S2IO_BIT_RESET);
+				      S2IO_BIT_RESET, may_sleep);
 
 		sp->m_cast_flg = 1;
 		sp->all_multi_pos = config->max_mc_addr - 1;
@@ -4925,7 +4926,7 @@ static void s2io_set_multicast(struct net_device *dev)
 		/* Wait till command completes */
 		wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 				      RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-				      S2IO_BIT_RESET);
+				      S2IO_BIT_RESET, may_sleep);
 
 		sp->m_cast_flg = 0;
 		sp->all_multi_pos = 0;
@@ -5005,7 +5006,7 @@ static void s2io_set_multicast(struct net_device *dev)
 			/* Wait for command completes */
 			if (wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 						  RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-						  S2IO_BIT_RESET)) {
+						  S2IO_BIT_RESET, may_sleep)) {
 				DBG_PRINT(ERR_DBG,
 					  "%s: Adding Multicasts failed\n",
 					  dev->name);
@@ -5035,7 +5036,7 @@ static void s2io_set_multicast(struct net_device *dev)
 			/* Wait for command completes */
 			if (wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 						  RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-						  S2IO_BIT_RESET)) {
+						  S2IO_BIT_RESET, may_sleep)) {
 				DBG_PRINT(ERR_DBG,
 					  "%s: Adding Multicasts failed\n",
 					  dev->name);
@@ -5044,6 +5045,12 @@ static void s2io_set_multicast(struct net_device *dev)
 			i++;
 		}
 	}
+}
+
+/* NDO wrapper for s2io_set_multicast */
+static void s2io_ndo_set_multicast(struct net_device *dev)
+{
+	s2io_set_multicast(dev, false);
 }
 
 /* read from CAM unicast & multicast addresses and store it in
@@ -5085,13 +5092,10 @@ static void do_s2io_restore_unicast_mc(struct s2io_nic *sp)
 static int do_s2io_add_mc(struct s2io_nic *sp, u8 *addr)
 {
 	int i;
-	u64 mac_addr = 0;
+	u64 mac_addr;
 	struct config_param *config = &sp->config;
 
-	for (i = 0; i < ETH_ALEN; i++) {
-		mac_addr <<= 8;
-		mac_addr |= addr[i];
-	}
+	mac_addr = ether_addr_to_u64(addr);
 	if ((0ULL == mac_addr) || (mac_addr == S2IO_DISABLE_MAC_ENTRY))
 		return SUCCESS;
 
@@ -5132,7 +5136,7 @@ static int do_s2io_add_mac(struct s2io_nic *sp, u64 addr, int off)
 	/* Wait till command completes */
 	if (wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 				  RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-				  S2IO_BIT_RESET)) {
+				  S2IO_BIT_RESET, true)) {
 		DBG_PRINT(INFO_DBG, "do_s2io_add_mac failed\n");
 		return FAILURE;
 	}
@@ -5165,7 +5169,7 @@ static int do_s2io_delete_unicast_mc(struct s2io_nic *sp, u64 addr)
 /* read mac entries from CAM */
 static u64 do_s2io_read_unicast_mc(struct s2io_nic *sp, int offset)
 {
-	u64 tmp64 = 0xffffffffffff0000ULL, val64;
+	u64 tmp64, val64;
 	struct XENA_dev_config __iomem *bar0 = sp->bar0;
 
 	/* read mac addr */
@@ -5176,7 +5180,7 @@ static u64 do_s2io_read_unicast_mc(struct s2io_nic *sp, int offset)
 	/* Wait till command completes */
 	if (wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 				  RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-				  S2IO_BIT_RESET)) {
+				  S2IO_BIT_RESET, true)) {
 		DBG_PRINT(INFO_DBG, "do_s2io_read_unicast_mc failed\n");
 		return FAILURE;
 	}
@@ -5185,7 +5189,7 @@ static u64 do_s2io_read_unicast_mc(struct s2io_nic *sp, int offset)
 	return tmp64 >> 16;
 }
 
-/**
+/*
  * s2io_set_mac_addr - driver entry point
  */
 
@@ -5196,7 +5200,7 @@ static int s2io_set_mac_addr(struct net_device *dev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, addr->sa_data);
 
 	/* store the MAC address in CAM */
 	return do_s2io_prog_unicast(dev, dev->dev_addr);
@@ -5211,10 +5215,10 @@ static int s2io_set_mac_addr(struct net_device *dev, void *p)
  *  as defined in errno.h file on failure.
  */
 
-static int do_s2io_prog_unicast(struct net_device *dev, u8 *addr)
+static int do_s2io_prog_unicast(struct net_device *dev, const u8 *addr)
 {
 	struct s2io_nic *sp = netdev_priv(dev);
-	register u64 mac_addr = 0, perm_addr = 0;
+	register u64 mac_addr, perm_addr;
 	int i;
 	u64 tmp64;
 	struct config_param *config = &sp->config;
@@ -5224,12 +5228,8 @@ static int do_s2io_prog_unicast(struct net_device *dev, u8 *addr)
 	 * change on the device address registered with the OS. It will be
 	 * at offset 0.
 	 */
-	for (i = 0; i < ETH_ALEN; i++) {
-		mac_addr <<= 8;
-		mac_addr |= addr[i];
-		perm_addr <<= 8;
-		perm_addr |= sp->def_mac_addr[0].mac_addr[i];
-	}
+	mac_addr = ether_addr_to_u64(addr);
+	perm_addr = ether_addr_to_u64(sp->def_mac_addr[0].mac_addr);
 
 	/* check if the dev_addr is different than perm_addr */
 	if (mac_addr == perm_addr)
@@ -5260,8 +5260,7 @@ static int do_s2io_prog_unicast(struct net_device *dev, u8 *addr)
 
 /**
  * s2io_ethtool_set_link_ksettings - Sets different link parameters.
- * @sp : private member of the device structure, which is a pointer to the
- * s2io_nic structure.
+ * @dev : pointer to netdev
  * @cmd: pointer to the structure with parameters given by ethtool to set
  * link information.
  * Description:
@@ -5289,9 +5288,8 @@ s2io_ethtool_set_link_ksettings(struct net_device *dev,
 }
 
 /**
- * s2io_ethtol_get_link_ksettings - Return link specific information.
- * @sp : private member of the device structure, pointer to the
- *      s2io_nic structure.
+ * s2io_ethtool_get_link_ksettings - Return link specific information.
+ * @dev: pointer to netdev
  * @cmd : pointer to the structure with parameters given by ethtool
  * to return link information.
  * Description:
@@ -5330,8 +5328,7 @@ s2io_ethtool_get_link_ksettings(struct net_device *dev,
 
 /**
  * s2io_ethtool_gdrvinfo - Returns driver specific information.
- * @sp : private member of the device structure, which is a pointer to the
- * s2io_nic structure.
+ * @dev: pointer to netdev
  * @info : pointer to the structure with parameters given by ethtool to
  * return driver information.
  * Description:
@@ -5345,18 +5342,17 @@ static void s2io_ethtool_gdrvinfo(struct net_device *dev,
 {
 	struct s2io_nic *sp = netdev_priv(dev);
 
-	strlcpy(info->driver, s2io_driver_name, sizeof(info->driver));
-	strlcpy(info->version, s2io_driver_version, sizeof(info->version));
-	strlcpy(info->bus_info, pci_name(sp->pdev), sizeof(info->bus_info));
+	strscpy(info->driver, s2io_driver_name, sizeof(info->driver));
+	strscpy(info->version, s2io_driver_version, sizeof(info->version));
+	strscpy(info->bus_info, pci_name(sp->pdev), sizeof(info->bus_info));
 }
 
 /**
  *  s2io_ethtool_gregs - dumps the entire space of Xfame into the buffer.
- *  @sp: private member of the device structure, which is a pointer to the
- *  s2io_nic structure.
+ *  @dev: pointer to netdev
  *  @regs : pointer to the structure with parameters given by ethtool for
- *  dumping the registers.
- *  @reg_space: The input argument into which all the registers are dumped.
+ *          dumping the registers.
+ *  @space: The input argument into which all the registers are dumped.
  *  Description:
  *  Dumps the entire register space of xFrame NIC into the user given
  *  buffer area.
@@ -5459,8 +5455,11 @@ static int s2io_ethtool_set_led(struct net_device *dev,
 	return 0;
 }
 
-static void s2io_ethtool_gringparam(struct net_device *dev,
-				    struct ethtool_ringparam *ering)
+static void
+s2io_ethtool_gringparam(struct net_device *dev,
+			struct ethtool_ringparam *ering,
+			struct kernel_ethtool_ringparam *kernel_ering,
+			struct netlink_ext_ack *extack)
 {
 	struct s2io_nic *sp = netdev_priv(dev);
 	int i, tx_desc_count = 0, rx_desc_count = 0;
@@ -5487,9 +5486,8 @@ static void s2io_ethtool_gringparam(struct net_device *dev,
 }
 
 /**
- * s2io_ethtool_getpause_data -Pause frame frame generation and reception.
- * @sp : private member of the device structure, which is a pointer to the
- *	s2io_nic structure.
+ * s2io_ethtool_getpause_data -Pause frame generation and reception.
+ * @dev: pointer to netdev
  * @ep : pointer to the structure with pause parameters given by ethtool.
  * Description:
  * Returns the Pause frame generation and reception capability of the NIC.
@@ -5513,8 +5511,7 @@ static void s2io_ethtool_getpause_data(struct net_device *dev,
 
 /**
  * s2io_ethtool_setpause_data -  set/reset pause frame generation.
- * @sp : private member of the device structure, which is a pointer to the
- *      s2io_nic structure.
+ * @dev: pointer to netdev
  * @ep : pointer to the structure with pause parameters given by ethtool.
  * Description:
  * It can be used to set or reset Pause frame generation or reception
@@ -5543,6 +5540,7 @@ static int s2io_ethtool_setpause_data(struct net_device *dev,
 	return 0;
 }
 
+#define S2IO_DEV_ID		5
 /**
  * read_eeprom - reads 4 bytes of data from user given offset.
  * @sp : private member of the device structure, which is a pointer to the
@@ -5558,8 +5556,6 @@ static int s2io_ethtool_setpause_data(struct net_device *dev,
  * Return value:
  *  -1 on failure and 0 on success.
  */
-
-#define S2IO_DEV_ID		5
 static int read_eeprom(struct s2io_nic *sp, int off, u64 *data)
 {
 	int ret = -1;
@@ -5751,8 +5747,7 @@ static void s2io_vpd_read(struct s2io_nic *nic)
 
 /**
  *  s2io_ethtool_geeprom  - reads the value stored in the Eeprom.
- *  @sp : private member of the device structure, which is a pointer to the
- *  s2io_nic structure.
+ *  @dev: pointer to netdev
  *  @eeprom : pointer to the user level structure provided by ethtool,
  *  containing all relevant information.
  *  @data_buf : user defined value to be written into Eeprom.
@@ -5788,11 +5783,10 @@ static int s2io_ethtool_geeprom(struct net_device *dev,
 
 /**
  *  s2io_ethtool_seeprom - tries to write the user provided value in Eeprom
- *  @sp : private member of the device structure, which is a pointer to the
- *  s2io_nic structure.
+ *  @dev: pointer to netdev
  *  @eeprom : pointer to the user level structure provided by ethtool,
  *  containing all relevant information.
- *  @data_buf ; user defined value to be written into Eeprom.
+ *  @data_buf : user defined value to be written into Eeprom.
  *  Description:
  *  Tries to write the user provided value in the Eeprom, at the offset
  *  given by the user.
@@ -6044,7 +6038,7 @@ static int s2io_bist_test(struct s2io_nic *sp, uint64_t *data)
 
 /**
  * s2io_link_test - verifies the link state of the nic
- * @sp ; private member of the device structure, which is a pointer to the
+ * @sp: private member of the device structure, which is a pointer to the
  * s2io_nic structure.
  * @data: variable that returns the result of each of the test conducted by
  * the driver.
@@ -6167,8 +6161,7 @@ static int s2io_rldram_test(struct s2io_nic *sp, uint64_t *data)
 
 /**
  *  s2io_ethtool_test - conducts 6 tsets to determine the health of card.
- *  @sp : private member of the device structure, which is a pointer to the
- *  s2io_nic structure.
+ *  @dev: pointer to netdev
  *  @ethtest : pointer to a ethtool command specific structure that will be
  *  returned to the user.
  *  @data : variable that returns the result of each of the test
@@ -6614,7 +6607,7 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 /**
  *  s2io_ioctl - Entry point for the Ioctl
  *  @dev :  Device pointer.
- *  @ifr :  An IOCTL specefic structure, that can contain a pointer to
+ *  @rq :  An IOCTL specefic structure, that can contain a pointer to
  *  a proprietary structure used to pass information to the driver.
  *  @cmd :  This is used to distinguish between the different commands that
  *  can be passed to the IOCTL functions.
@@ -6644,7 +6637,7 @@ static int s2io_change_mtu(struct net_device *dev, int new_mtu)
 	struct s2io_nic *sp = netdev_priv(dev);
 	int ret = 0;
 
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	if (netif_running(dev)) {
 		s2io_stop_all_tx_queue(sp);
 		s2io_card_down(sp);
@@ -6667,7 +6660,7 @@ static int s2io_change_mtu(struct net_device *dev, int new_mtu)
 
 /**
  * s2io_set_link - Set the LInk status
- * @data: long pointer to device private structue
+ * @work: work struct containing a pointer to device private structure
  * Description: Sets the link status for the adapter
  */
 
@@ -6782,10 +6775,10 @@ static int set_rxd_buffer_pointer(struct s2io_nic *sp, struct RxD_t *rxdp,
 			 * Host Control is NULL
 			 */
 			rxdp1->Buffer0_ptr = *temp0 =
-				pci_map_single(sp->pdev, (*skb)->data,
+				dma_map_single(&sp->pdev->dev, (*skb)->data,
 					       size - NET_IP_ALIGN,
-					       PCI_DMA_FROMDEVICE);
-			if (pci_dma_mapping_error(sp->pdev, rxdp1->Buffer0_ptr))
+					       DMA_FROM_DEVICE);
+			if (dma_mapping_error(&sp->pdev->dev, rxdp1->Buffer0_ptr))
 				goto memalloc_failed;
 			rxdp->Host_Control = (unsigned long) (*skb);
 		}
@@ -6808,37 +6801,34 @@ static int set_rxd_buffer_pointer(struct s2io_nic *sp, struct RxD_t *rxdp,
 			}
 			stats->mem_allocated += (*skb)->truesize;
 			rxdp3->Buffer2_ptr = *temp2 =
-				pci_map_single(sp->pdev, (*skb)->data,
-					       dev->mtu + 4,
-					       PCI_DMA_FROMDEVICE);
-			if (pci_dma_mapping_error(sp->pdev, rxdp3->Buffer2_ptr))
+				dma_map_single(&sp->pdev->dev, (*skb)->data,
+					       dev->mtu + 4, DMA_FROM_DEVICE);
+			if (dma_mapping_error(&sp->pdev->dev, rxdp3->Buffer2_ptr))
 				goto memalloc_failed;
 			rxdp3->Buffer0_ptr = *temp0 =
-				pci_map_single(sp->pdev, ba->ba_0, BUF0_LEN,
-					       PCI_DMA_FROMDEVICE);
-			if (pci_dma_mapping_error(sp->pdev,
-						  rxdp3->Buffer0_ptr)) {
-				pci_unmap_single(sp->pdev,
+				dma_map_single(&sp->pdev->dev, ba->ba_0,
+					       BUF0_LEN, DMA_FROM_DEVICE);
+			if (dma_mapping_error(&sp->pdev->dev, rxdp3->Buffer0_ptr)) {
+				dma_unmap_single(&sp->pdev->dev,
 						 (dma_addr_t)rxdp3->Buffer2_ptr,
 						 dev->mtu + 4,
-						 PCI_DMA_FROMDEVICE);
+						 DMA_FROM_DEVICE);
 				goto memalloc_failed;
 			}
 			rxdp->Host_Control = (unsigned long) (*skb);
 
 			/* Buffer-1 will be dummy buffer not used */
 			rxdp3->Buffer1_ptr = *temp1 =
-				pci_map_single(sp->pdev, ba->ba_1, BUF1_LEN,
-					       PCI_DMA_FROMDEVICE);
-			if (pci_dma_mapping_error(sp->pdev,
-						  rxdp3->Buffer1_ptr)) {
-				pci_unmap_single(sp->pdev,
+				dma_map_single(&sp->pdev->dev, ba->ba_1,
+					       BUF1_LEN, DMA_FROM_DEVICE);
+			if (dma_mapping_error(&sp->pdev->dev, rxdp3->Buffer1_ptr)) {
+				dma_unmap_single(&sp->pdev->dev,
 						 (dma_addr_t)rxdp3->Buffer0_ptr,
-						 BUF0_LEN, PCI_DMA_FROMDEVICE);
-				pci_unmap_single(sp->pdev,
+						 BUF0_LEN, DMA_FROM_DEVICE);
+				dma_unmap_single(&sp->pdev->dev,
 						 (dma_addr_t)rxdp3->Buffer2_ptr,
 						 dev->mtu + 4,
-						 PCI_DMA_FROMDEVICE);
+						 DMA_FROM_DEVICE);
 				goto memalloc_failed;
 			}
 		}
@@ -7029,7 +7019,7 @@ static void do_s2io_card_down(struct s2io_nic *sp, int do_io)
 	if (!is_s2io_card_up(sp))
 		return;
 
-	del_timer_sync(&sp->alarm_timer);
+	timer_delete_sync(&sp->alarm_timer);
 	/* If s2io_set_link task is executing, wait till it completes. */
 	while (test_and_set_bit(__S2IO_STATE_LINK_TASK, &(sp->state)))
 		msleep(50);
@@ -7132,9 +7122,8 @@ static int s2io_card_up(struct s2io_nic *sp)
 		if (ret) {
 			DBG_PRINT(ERR_DBG, "%s: Out of memory in Open\n",
 				  dev->name);
-			s2io_reset(sp);
-			free_rx_buffers(sp);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto err_fill_buff;
 		}
 		DBG_PRINT(INFO_DBG, "Buf in ring:%d is %d:\n", i,
 			  ring->rx_bufs_left);
@@ -7159,7 +7148,7 @@ static int s2io_card_up(struct s2io_nic *sp)
 	}
 
 	/* Setting its receive mode */
-	s2io_set_multicast(dev);
+	s2io_set_multicast(dev, true);
 
 	if (dev->features & NETIF_F_LRO) {
 		/* Initialize max aggregatable pkts per session based on MTU */
@@ -7172,21 +7161,20 @@ static int s2io_card_up(struct s2io_nic *sp)
 	/* Enable Rx Traffic and interrupts on the NIC */
 	if (start_nic(sp)) {
 		DBG_PRINT(ERR_DBG, "%s: Starting NIC failed\n", dev->name);
-		s2io_reset(sp);
-		free_rx_buffers(sp);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err_out;
 	}
 
 	/* Add interrupt service routine */
 	if (s2io_add_isr(sp) != 0) {
 		if (sp->config.intr_type == MSI_X)
 			s2io_rem_isr(sp);
-		s2io_reset(sp);
-		free_rx_buffers(sp);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err_out;
 	}
 
-	S2IO_TIMER_CONF(sp->alarm_timer, s2io_alarm_handle, sp, (HZ/2));
+	timer_setup(&sp->alarm_timer, s2io_alarm_handle, 0);
+	mod_timer(&sp->alarm_timer, jiffies + HZ / 2);
 
 	set_bit(__S2IO_STATE_CARD_UP, &sp->state);
 
@@ -7202,11 +7190,25 @@ static int s2io_card_up(struct s2io_nic *sp)
 	}
 
 	return 0;
+
+err_out:
+	if (config->napi) {
+		if (config->intr_type == MSI_X) {
+			for (i = 0; i < sp->config.rx_ring_num; i++)
+				napi_disable(&sp->mac_control.rings[i].napi);
+		} else {
+			napi_disable(&sp->napi);
+		}
+	}
+err_fill_buff:
+	s2io_reset(sp);
+	free_rx_buffers(sp);
+	return ret;
 }
 
 /**
  * s2io_restart_nic - Resets the NIC.
- * @data : long pointer to the device private structure
+ * @work : work struct containing a pointer to the device private structure
  * Description:
  * This function is scheduled to be run by the s2io_tx_watchdog
  * function after 0.5 secs to reset the NIC. The idea is to reduce
@@ -7237,6 +7239,7 @@ out_unlock:
 /**
  *  s2io_tx_watchdog - Watchdog for transmit side.
  *  @dev : Pointer to net device structure
+ *  @txqueue: index of the hanging queue
  *  Description:
  *  This function is triggered if the Tx Queue is stopped
  *  for a pre-defined amount of time when the Interface is still up.
@@ -7247,7 +7250,7 @@ out_unlock:
  *  void
  */
 
-static void s2io_tx_watchdog(struct net_device *dev)
+static void s2io_tx_watchdog(struct net_device *dev, unsigned int txqueue)
 {
 	struct s2io_nic *sp = netdev_priv(dev);
 	struct swStat *swstats = &sp->mac_control.stats_info->sw_stat;
@@ -7261,11 +7264,8 @@ static void s2io_tx_watchdog(struct net_device *dev)
 
 /**
  *   rx_osm_handler - To perform some OS related operations on SKB.
- *   @sp: private member of the device structure,pointer to s2io_nic structure.
- *   @skb : the socket buffer pointer.
- *   @len : length of the packet
- *   @cksum : FCS checksum of the frame.
- *   @ring_no : the ring from which this RxD was extracted.
+ *   @ring_data : the ring from which this RxD was extracted.
+ *   @rxdp: descriptor
  *   Description:
  *   This function is called by the Rx interrupt serivce routine to perform
  *   some OS related operations on the SKB before passing it to the upper
@@ -7285,7 +7285,7 @@ static int rx_osm_handler(struct ring_info *ring_data, struct RxD_t * rxdp)
 	int ring_no = ring_data->ring_no;
 	u16 l3_csum, l4_csum;
 	unsigned long long err = rxdp->Control_1 & RXD_T_CODE;
-	struct lro *uninitialized_var(lro);
+	struct lro *lro;
 	u8 err_mask;
 	struct swStat *swstats = &sp->mac_control.stats_info->sw_stat;
 
@@ -7364,10 +7364,9 @@ static int rx_osm_handler(struct ring_info *ring_data, struct RxD_t * rxdp)
 		int get_off = ring_data->rx_curr_get_info.offset;
 		int buf0_len = RXD_GET_BUFFER0_SIZE_3(rxdp->Control_2);
 		int buf2_len = RXD_GET_BUFFER2_SIZE_3(rxdp->Control_2);
-		unsigned char *buff = skb_push(skb, buf0_len);
 
 		struct buffAdd *ba = &ring_data->ba[get_block][get_off];
-		memcpy(buff, ba->ba_0, buf0_len);
+		skb_put_data(skb, ba->ba_0, buf0_len);
 		skb_put(skb, buf2_len);
 	}
 
@@ -7454,7 +7453,7 @@ aggregate:
  *  @link : inidicates whether link is UP/DOWN.
  *  Description:
  *  This function stops/starts the Tx queue depending on whether the link
- *  status of the NIC is is down or up. This is called by the Alarm
+ *  status of the NIC is down or up. This is called by the Alarm
  *  interrupt handler whenever a link change interrupt comes up.
  *  Return value:
  *  void.
@@ -7466,7 +7465,7 @@ static void s2io_link(struct s2io_nic *sp, int link)
 	struct swStat *swstats = &sp->mac_control.stats_info->sw_stat;
 
 	if (link != sp->last_link_state) {
-		init_tti(sp, link);
+		init_tti(sp, link, false);
 		if (link == LINK_DOWN) {
 			DBG_PRINT(ERR_DBG, "%s: Link down\n", dev->name);
 			s2io_stop_all_tx_queue(sp);
@@ -7595,9 +7594,10 @@ static int s2io_verify_parm(struct pci_dev *pdev, u8 *dev_intr_type,
 }
 
 /**
- * rts_ds_steer - Receive traffic steering based on IPv4 or IPv6 TOS
- * or Traffic class respectively.
+ * rts_ds_steer - Receive traffic steering based on IPv4 or IPv6 TOS or Traffic class respectively.
  * @nic: device private variable
+ * @ds_codepoint: data
+ * @ring: ring index
  * Description: The function configures the receive steering to
  * desired receive ring.
  * Return Value:  SUCCESS on success and
@@ -7622,7 +7622,7 @@ static int rts_ds_steer(struct s2io_nic *nic, u8 ds_codepoint, u8 ring)
 
 	return wait_for_cmd_complete(&bar0->rts_ds_mem_ctrl,
 				     RTS_DS_MEM_CTRL_STROBE_CMD_BEING_EXECUTED,
-				     S2IO_BIT_RESET);
+				     S2IO_BIT_RESET, true);
 }
 
 static const struct net_device_ops s2io_netdev_ops = {
@@ -7631,8 +7631,8 @@ static const struct net_device_ops s2io_netdev_ops = {
 	.ndo_get_stats	        = s2io_get_stats,
 	.ndo_start_xmit    	= s2io_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_rx_mode	= s2io_set_multicast,
-	.ndo_do_ioctl	   	= s2io_ioctl,
+	.ndo_set_rx_mode	= s2io_ndo_set_multicast,
+	.ndo_eth_ioctl		= s2io_ioctl,
 	.ndo_set_mac_address    = s2io_set_mac_addr,
 	.ndo_change_mtu	   	= s2io_change_mtu,
 	.ndo_set_features	= s2io_set_features,
@@ -7662,7 +7662,6 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 	struct s2io_nic *sp;
 	struct net_device *dev;
 	int i, j, ret;
-	int dma_flag = false;
 	u32 mac_up, mac_down;
 	u64 val64 = 0, tmp64 = 0;
 	struct XENA_dev_config __iomem *bar0 = NULL;
@@ -7684,18 +7683,8 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 		return ret;
 	}
 
-	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
+	if (!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
 		DBG_PRINT(INIT_DBG, "%s: Using 64bit DMA\n", __func__);
-		dma_flag = true;
-		if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64))) {
-			DBG_PRINT(ERR_DBG,
-				  "Unable to obtain 64bit DMA "
-				  "for consistent allocations\n");
-			pci_disable_device(pdev);
-			return -ENOMEM;
-		}
-	} else if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
-		DBG_PRINT(INIT_DBG, "%s: Using 32bit DMA\n", __func__);
 	} else {
 		pci_disable_device(pdev);
 		return -ENOMEM;
@@ -7725,7 +7714,6 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 	sp = netdev_priv(dev);
 	sp->dev = dev;
 	sp->pdev = pdev;
-	sp->high_dma_flag = dma_flag;
 	sp->device_enabled_once = false;
 	if (rx_ring_mode == 1)
 		sp->rxd_mode = RXD_MODE_1;
@@ -7748,7 +7736,7 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 	 * Setting the device configuration parameters.
 	 * Most of these parameters can be specified by the user during
 	 * module insertion as they are module loadable parameters. If
-	 * these parameters are not not specified during load time, they
+	 * these parameters are not specified during load time, they
 	 * are initialized with default values.
 	 */
 	config = &sp->config;
@@ -7873,9 +7861,8 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 		NETIF_F_TSO | NETIF_F_TSO6 |
 		NETIF_F_RXCSUM | NETIF_F_LRO;
 	dev->features |= dev->hw_features |
-		NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX;
-	if (sp->high_dma_flag == true)
-		dev->features |= NETIF_F_HIGHDMA;
+		NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
+		NETIF_F_HIGHDMA;
 	dev->watchdog_timeo = WATCH_DOG_TIMEOUT;
 	INIT_WORK(&sp->rst_timer_task, s2io_restart_nic);
 	INIT_WORK(&sp->set_link_task, s2io_set_link);
@@ -7922,10 +7909,10 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 		for (i = 0; i < config->rx_ring_num ; i++) {
 			struct ring_info *ring = &mac_control->rings[i];
 
-			netif_napi_add(dev, &ring->napi, s2io_poll_msix, 64);
+			netif_napi_add(dev, &ring->napi, s2io_poll_msix);
 		}
 	} else {
-		netif_napi_add(dev, &sp->napi, s2io_poll_inta, 64);
+		netif_napi_add(dev, &sp->napi, s2io_poll_inta);
 	}
 
 	/* Not needed for Herc */
@@ -7948,7 +7935,7 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 	writeq(val64, &bar0->rmac_addr_cmd_mem);
 	wait_for_cmd_complete(&bar0->rmac_addr_cmd_mem,
 			      RMAC_ADDR_CMD_MEM_STROBE_CMD_EXECUTING,
-			      S2IO_BIT_RESET);
+			      S2IO_BIT_RESET, true);
 	tmp64 = readq(&bar0->rmac_addr_data0_mem);
 	mac_down = (u32)tmp64;
 	mac_up = (u32) (tmp64 >> 32);
@@ -7962,7 +7949,7 @@ s2io_init_nic(struct pci_dev *pdev, const struct pci_device_id *pre)
 
 	/*  Set the factory defined MAC address initially   */
 	dev->addr_len = ETH_ALEN;
-	memcpy(dev->dev_addr, sp->def_mac_addr, ETH_ALEN);
+	eth_hw_addr_set(dev, sp->def_mac_addr[0].mac_addr);
 
 	/* initialize number of multicast & unicast MAC entries variables */
 	if (sp->device_type == XFRAME_I_DEVICE) {
@@ -8536,7 +8523,7 @@ static pci_ers_result_t s2io_io_error_detected(struct pci_dev *pdev,
  * @pdev: Pointer to PCI device
  *
  * Restart the card from scratch, as if from a cold-boot.
- * At this point, the card has exprienced a hard reset,
+ * At this point, the card has experienced a hard reset,
  * followed by fixups by BIOS, and has its config space
  * set up identically to what it was at cold boot.
  */
@@ -8574,7 +8561,7 @@ static void s2io_io_resume(struct pci_dev *pdev)
 			return;
 		}
 
-		if (s2io_set_mac_addr(netdev, netdev->dev_addr) == FAILURE) {
+		if (do_s2io_prog_unicast(netdev, netdev->dev_addr) == FAILURE) {
 			s2io_card_down(sp);
 			pr_err("Can't restore mac addr after reset.\n");
 			return;

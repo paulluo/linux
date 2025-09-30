@@ -75,37 +75,34 @@ struct i915_syncmap {
 	unsigned int height;
 	unsigned int bitmap;
 	struct i915_syncmap *parent;
-	/*
-	 * Following this header is an array of either seqno or child pointers:
-	 * union {
-	 *	u32 seqno[KSYNCMAP];
-	 *	struct i915_syncmap *child[KSYNCMAP];
-	 * };
-	 */
+	union {
+		DECLARE_FLEX_ARRAY(u32, seqno);
+		DECLARE_FLEX_ARRAY(struct i915_syncmap *, child);
+	};
 };
 
 /**
  * i915_syncmap_init -- initialise the #i915_syncmap
- * @root - pointer to the #i915_syncmap
+ * @root: pointer to the #i915_syncmap
  */
 void i915_syncmap_init(struct i915_syncmap **root)
 {
 	BUILD_BUG_ON_NOT_POWER_OF_2(KSYNCMAP);
 	BUILD_BUG_ON_NOT_POWER_OF_2(SHIFT);
-	BUILD_BUG_ON(KSYNCMAP > BITS_PER_BYTE * sizeof((*root)->bitmap));
+	BUILD_BUG_ON(KSYNCMAP > BITS_PER_TYPE((*root)->bitmap));
 	*root = NULL;
 }
 
 static inline u32 *__sync_seqno(struct i915_syncmap *p)
 {
 	GEM_BUG_ON(p->height);
-	return (u32 *)(p + 1);
+	return p->seqno;
 }
 
 static inline struct i915_syncmap **__sync_child(struct i915_syncmap *p)
 {
 	GEM_BUG_ON(!p->height);
-	return (struct i915_syncmap **)(p + 1);
+	return p->child;
 }
 
 static inline unsigned int
@@ -139,9 +136,9 @@ static inline bool seqno_later(u32 a, u32 b)
 
 /**
  * i915_syncmap_is_later -- compare against the last know sync point
- * @root - pointer to the #i915_syncmap
- * @id - the context id (other timeline) we are synchronising to
- * @seqno - the sequence number along the other timeline
+ * @root: pointer to the #i915_syncmap
+ * @id: the context id (other timeline) we are synchronising to
+ * @seqno: the sequence number along the other timeline
  *
  * If we have already synchronised this @root timeline with another (@id) then
  * we can omit any repeated or earlier synchronisation requests. If the two
@@ -200,7 +197,7 @@ __sync_alloc_leaf(struct i915_syncmap *parent, u64 id)
 {
 	struct i915_syncmap *p;
 
-	p = kmalloc(sizeof(*p) + KSYNCMAP * sizeof(u32), GFP_KERNEL);
+	p = kmalloc(struct_size(p, seqno, KSYNCMAP), GFP_KERNEL);
 	if (unlikely(!p))
 		return NULL;
 
@@ -282,7 +279,7 @@ static noinline int __sync_set(struct i915_syncmap **root, u64 id, u32 seqno)
 			unsigned int above;
 
 			/* Insert a join above the current layer */
-			next = kzalloc(sizeof(*next) + KSYNCMAP * sizeof(next),
+			next = kzalloc(struct_size(next, child, KSYNCMAP),
 				       GFP_KERNEL);
 			if (unlikely(!next))
 				return -ENOMEM;
@@ -339,9 +336,9 @@ found:
 
 /**
  * i915_syncmap_set -- mark the most recent syncpoint between contexts
- * @root - pointer to the #i915_syncmap
- * @id - the context id (other timeline) we have synchronised to
- * @seqno - the sequence number along the other timeline
+ * @root: pointer to the #i915_syncmap
+ * @id: the context id (other timeline) we have synchronised to
+ * @seqno: the sequence number along the other timeline
  *
  * When we synchronise this @root timeline with another (@id), we also know
  * that we have synchronized with all previous seqno along that timeline. If
@@ -382,7 +379,7 @@ static void __sync_free(struct i915_syncmap *p)
 
 /**
  * i915_syncmap_free -- free all memory associated with the syncmap
- * @root - pointer to the #i915_syncmap
+ * @root: pointer to the #i915_syncmap
  *
  * Either when the timeline is to be freed and we no longer need the sync
  * point tracking, or when the fences are all known to be signaled and the

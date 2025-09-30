@@ -1,12 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Broadcom Starfighter 2 switch register defines
  *
  * Copyright (C) 2014, Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #ifndef __BCM_SF2_REGS_H
 #define __BCM_SF2_REGS_H
@@ -21,12 +17,18 @@ enum bcm_sf2_reg_offs {
 	REG_SWITCH_REVISION,
 	REG_PHY_REVISION,
 	REG_SPHY_CNTRL,
+	REG_CROSSBAR,
 	REG_RGMII_0_CNTRL,
 	REG_RGMII_1_CNTRL,
 	REG_RGMII_2_CNTRL,
+	REG_RGMII_11_CNTRL,
 	REG_LED_0_CNTRL,
 	REG_LED_1_CNTRL,
 	REG_LED_2_CNTRL,
+	REG_LED_3_CNTRL,
+	REG_LED_4_CNTRL,
+	REG_LED_5_CNTRL,
+	REG_LED_AGGREGATE_CTRL,
 	REG_SWITCH_REG_MAX,
 };
 
@@ -51,7 +53,69 @@ enum bcm_sf2_reg_offs {
 #define  PHY_PHYAD_SHIFT		8
 #define  PHY_PHYAD_MASK			0x1F
 
-#define REG_RGMII_CNTRL_P(x)		(REG_RGMII_0_CNTRL + (x))
+/* Relative to REG_CROSSBAR */
+#define CROSSBAR_BCM4908_INT_P7		0
+#define CROSSBAR_BCM4908_INT_RUNNER	1
+#define CROSSBAR_BCM4908_EXT_SERDES	0
+#define CROSSBAR_BCM4908_EXT_GPHY4	1
+#define CROSSBAR_BCM4908_EXT_RGMII	2
+
+/* Relative to REG_LED_*_CNTRL (BCM7278, BCM7445) */
+#define  LED_CNTRL_NO_LINK_ENCODE_SHIFT		0
+#define  LED_CNTRL_M10_ENCODE_SHIFT		2
+#define  LED_CNTRL_M100_ENCODE_SHIFT		4
+#define  LED_CNTRL_M1000_ENCODE_SHIFT		6
+#define  LED_CNTRL_SEL_NO_LINK_ENCODE_SHIFT	8
+#define  LED_CNTRL_SEL_10M_ENCODE_SHIFT		10
+#define  LED_CNTRL_SEL_100M_ENCODE_SHIFT	12
+#define  LED_CNTRL_SEL_1000M_ENCODE_SHIFT	14
+#define  LED_CNTRL_RX_DV_EN			(1 << 16)
+#define  LED_CNTRL_TX_EN_EN			(1 << 17)
+#define  LED_CNTRL_SPDLNK_LED0_ACT_SEL_SHIFT	18
+#define  LED_CNTRL_SPDLNK_LED1_ACT_SEL_SHIFT	20
+#define  LED_CNTRL_ACT_LED_ACT_SEL_SHIFT	22
+#define  LED_CNTRL_SPDLNK_SRC_SEL		(1 << 24)
+#define  LED_CNTRL_SPDLNK_LED0_ACT_POL_SEL	(1 << 25)
+#define  LED_CNTRL_SPDLNK_LED1_ACT_POL_SEL	(1 << 26)
+#define  LED_CNTRL_ACT_LED_POL_SEL		(1 << 27)
+#define  LED_CNTRL_MASK				0x3
+
+/* Register relative to REG_LED_*_CNTRL (BCM4908) */
+#define REG_LED_CTRL				0x0
+#define  LED_CTRL_RX_ACT_EN			0x00000001
+#define  LED_CTRL_TX_ACT_EN			0x00000002
+#define  LED_CTRL_SPDLNK_LED0_ACT_SEL		0x00000004
+#define  LED_CTRL_SPDLNK_LED1_ACT_SEL		0x00000008
+#define  LED_CTRL_SPDLNK_LED2_ACT_SEL		0x00000010
+#define  LED_CTRL_ACT_LED_ACT_SEL		0x00000020
+#define  LED_CTRL_SPDLNK_LED0_ACT_POL_SEL	0x00000040
+#define  LED_CTRL_SPDLNK_LED1_ACT_POL_SEL	0x00000080
+#define  LED_CTRL_SPDLNK_LED2_ACT_POL_SEL	0x00000100
+#define  LED_CTRL_ACT_LED_POL_SEL		0x00000200
+#define  LED_CTRL_LED_SPD_OVRD			0x00001c00
+#define  LED_CTRL_LNK_STATUS_OVRD		0x00002000
+#define  LED_CTRL_SPD_OVRD_EN			0x00004000
+#define  LED_CTRL_LNK_OVRD_EN			0x00008000
+
+/* Register relative to REG_LED_*_CNTRL (BCM4908) */
+#define REG_LED_LINK_SPEED_ENC_SEL		0x4
+#define  LED_LINK_SPEED_ENC_SEL_NO_LINK_SHIFT	0
+#define  LED_LINK_SPEED_ENC_SEL_10M_SHIFT	3
+#define  LED_LINK_SPEED_ENC_SEL_100M_SHIFT	6
+#define  LED_LINK_SPEED_ENC_SEL_1000M_SHIFT	9
+#define  LED_LINK_SPEED_ENC_SEL_2500M_SHIFT	12
+#define  LED_LINK_SPEED_ENC_SEL_10G_SHIFT	15
+#define  LED_LINK_SPEED_ENC_SEL_MASK		0x7
+
+/* Register relative to REG_LED_*_CNTRL (BCM4908) */
+#define REG_LED_LINK_SPEED_ENC			0x8
+#define  LED_LINK_SPEED_ENC_NO_LINK_SHIFT	0
+#define  LED_LINK_SPEED_ENC_M10_SHIFT		3
+#define  LED_LINK_SPEED_ENC_M100_SHIFT		6
+#define  LED_LINK_SPEED_ENC_M1000_SHIFT		9
+#define  LED_LINK_SPEED_ENC_M2500_SHIFT		12
+#define  LED_LINK_SPEED_ENC_M10G_SHIFT		15
+#define  LED_LINK_SPEED_ENC_MASK		0x7
 
 /* Relative to REG_RGMII_CNTRL */
 #define  RGMII_MODE_EN			(1 << 0)
@@ -69,10 +133,6 @@ enum bcm_sf2_reg_offs {
 #define  TX_CLK_STOP_EN			(1 << 8)
 #define  LPI_COUNT_SHIFT		9
 #define  LPI_COUNT_MASK			0x3F
-
-#define REG_LED_CNTRL(x)		(REG_LED_0_CNTRL + (x))
-
-#define  SPDLNK_SRC_SEL			(1 << 24)
 
 /* Register set relative to 'INTRL2_0' and 'INTRL2_1' */
 #define INTRL2_CPU_STATUS		0x00
@@ -115,6 +175,24 @@ enum bcm_sf2_reg_offs {
 #define P7_IRQ_OFF			0
 #define P_IRQ_OFF(x)			((6 - (x)) * P_NUM_IRQ)
 
+/* Register set relative to 'ACB' */
+#define ACB_CONTROL			0x00
+#define  ACB_EN				(1 << 0)
+#define  ACB_ALGORITHM			(1 << 1)
+#define  ACB_FLUSH_SHIFT		2
+#define  ACB_FLUSH_MASK			0x3
+
+#define ACB_QUEUE_0_CFG			0x08
+#define  XOFF_THRESHOLD_MASK		0x7ff
+#define  XON_EN				(1 << 11)
+#define  TOTAL_XOFF_THRESHOLD_SHIFT	12
+#define  TOTAL_XOFF_THRESHOLD_MASK	0x7ff
+#define  TOTAL_XOFF_EN			(1 << 23)
+#define  TOTAL_XON_EN			(1 << 24)
+#define  PKTLEN_SHIFT			25
+#define  PKTLEN_MASK			0x3f
+#define ACB_QUEUE_CFG(x)		(ACB_QUEUE_0_CFG + ((x) * 0x4))
+
 /* Register set relative to 'CORE' */
 #define CORE_G_PCTL_PORT0		0x00000
 #define CORE_G_PCTL_PORT(x)		(CORE_G_PCTL_PORT0 + (x * 0x4))
@@ -149,6 +227,8 @@ enum bcm_sf2_reg_offs {
 
 #define CORE_SWITCH_CTRL		0x00088
 #define  MII_DUMB_FWDG_EN		(1 << 6)
+
+#define CORE_DIS_LEARN			0x000f0
 
 #define CORE_SFT_LRN_CTRL		0x000f8
 #define  SW_LEARN_CNTL(x)		(1 << (x))
@@ -205,15 +285,7 @@ enum bcm_sf2_reg_offs {
 
 #define CORE_IMP0_PRT_ID		0x0804
 
-#define CORE_BRCM_HDR_CTRL		0x0080c
-#define  BRCM_HDR_EN_P8			(1 << 0)
-#define  BRCM_HDR_EN_P5			(1 << 1)
-#define  BRCM_HDR_EN_P7			(1 << 2)
-
 #define CORE_RST_MIB_CNT_EN		0x0950
-
-#define CORE_BRCM_HDR_RX_DIS		0x0980
-#define CORE_BRCM_HDR_TX_DIS		0x0988
 
 #define CORE_ARLA_VTBL_RWCTRL		0x1600
 #define  ARLA_VTBL_CMD_WRITE		0
@@ -245,15 +317,17 @@ enum bcm_sf2_reg_offs {
 #define CORE_PORT_VLAN_CTL_PORT(x)	(0xc400 + ((x) * 0x8))
 #define  PORT_VLAN_CTRL_MASK		0x1ff
 
+#define CORE_TXQ_THD_PAUSE_QN_PORT_0	0x2c80
+#define  TXQ_PAUSE_THD_MASK		0x7ff
+#define CORE_TXQ_THD_PAUSE_QN_PORT(x)	(CORE_TXQ_THD_PAUSE_QN_PORT_0 + \
+					(x) * 0x8)
+
 #define CORE_DEFAULT_1Q_TAG_P(x)	(0xd040 + ((x) * 8))
 #define  CFI_SHIFT			12
 #define  PRI_SHIFT			13
 #define  PRI_MASK			0x7
 
 #define CORE_JOIN_ALL_VLAN_EN		0xd140
-
-#define CORE_EEE_EN_CTRL		0x24800
-#define CORE_EEE_LPI_INDICATE		0x24810
 
 #define CORE_CFP_ACC			0x28000
 #define  OP_STR_DONE			(1 << 0)
@@ -290,14 +364,18 @@ enum bcm_sf2_reg_offs {
 /* UDF_DATA7 */
 #define L3_FRAMING_SHIFT		24
 #define L3_FRAMING_MASK			(0x3 << L3_FRAMING_SHIFT)
+#define IPTOS_SHIFT			16
+#define IPTOS_MASK			0xff
 #define IPPROTO_SHIFT			8
 #define IPPROTO_MASK			(0xff << IPPROTO_SHIFT)
-#define IP_FRAG				(1 << 7)
+#define IP_FRAG_SHIFT			7
+#define IP_FRAG				(1 << IP_FRAG_SHIFT)
 
 /* UDF_DATA0 */
 #define  SLICE_VALID			3
 #define  SLICE_NUM_SHIFT		2
 #define  SLICE_NUM(x)			((x) << SLICE_NUM_SHIFT)
+#define  SLICE_NUM_MASK			0x3
 
 #define CORE_CFP_MASK_PORT_0		0x280c0
 
@@ -382,6 +460,10 @@ enum bcm_sf2_reg_offs {
 #define CORE_RATE_METER6		0x281e0
 #define  CIR_REF_CNT_MASK		0x7ffff
 
+#define CORE_STAT_GREEN_CNTR		0x28200
+#define CORE_STAT_YELLOW_CNTR		0x28210
+#define CORE_STAT_RED_CNTR		0x28220
+
 #define CORE_CFP_CTL_REG		0x28400
 #define  CFP_EN_MAP_MASK		0x1ff
 
@@ -393,8 +475,15 @@ enum bcm_sf2_reg_offs {
 #define  CFG_UDF_EOL2			(2 << CFG_UDF_OFFSET_BASE_SHIFT)
 #define  CFG_UDF_EOL3			(3 << CFG_UDF_OFFSET_BASE_SHIFT)
 
+/* IPv6 slices */
+#define CORE_UDF_0_B_0_8_PORT_0		0x28500
+
+/* IPv6 chained slices */
+#define CORE_UDF_0_D_0_11_PORT_0	0x28680
+
 /* Number of slices for IPv4, IPv6 and non-IP */
-#define UDF_NUM_SLICES			9
+#define UDF_NUM_SLICES			4
+#define UDFS_PER_SLICE			9
 
 /* Spacing between different slices */
 #define UDF_SLICE_OFFSET		0x40

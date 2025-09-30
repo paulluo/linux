@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * INET         An implementation of the TCP/IP protocol suite for the LINUX
  *              operating system.  NET  is implemented using the  BSD Socket
@@ -6,12 +7,6 @@
  *              Definitions used by the ARCnet driver.
  *
  * Authors:     Avery Pennarun and David Woodhouse
- *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
- *
  */
 #ifndef _LINUX_ARCDEVICE_H
 #define _LINUX_ARCDEVICE_H
@@ -21,6 +16,7 @@
 
 #ifdef __KERNEL__
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 
 /*
  * RECON_THRESHOLD is the maximum number of RECON messages to receive
@@ -191,6 +187,8 @@ do {									\
 #define ARC_IS_5MBIT    1   /* card default speed is 5MBit */
 #define ARC_CAN_10MBIT  2   /* card uses COM20022, supporting 10MBit,
 				 but default is 2.5MBit. */
+#define ARC_HAS_LED     4   /* card has software controlled LEDs */
+#define ARC_HAS_ROTARY  8   /* card has rotary encoder */
 
 /* information needed to define an encapsulation driver */
 struct ArcProto {
@@ -271,7 +269,7 @@ struct arcnet_local {
 
 	struct net_device *dev;
 	int reply_status;
-	struct tasklet_struct reply_tasklet;
+	struct work_struct reply_work;
 
 	/*
 	 * Buffer management: an ARCnet card has 4 x 512-byte buffers, each of
@@ -302,6 +300,10 @@ struct arcnet_local {
 	int network_down;	/* do we think the network is down? */
 
 	int excnak_pending;    /* We just got an excesive nak interrupt */
+
+	/* RESET flag handling */
+	int reset_in_progress;
+	struct work_struct reset_work;
 
 	struct {
 		uint16_t sequence;	/* sequence number (incs with each packet) */
@@ -355,13 +357,20 @@ void arcnet_dump_skb(struct net_device *dev, struct sk_buff *skb, char *desc)
 
 void arcnet_unregister_proto(struct ArcProto *proto);
 irqreturn_t arcnet_interrupt(int irq, void *dev_id);
+
 struct net_device *alloc_arcdev(const char *name);
+void free_arcdev(struct net_device *dev);
 
 int arcnet_open(struct net_device *dev);
 int arcnet_close(struct net_device *dev);
 netdev_tx_t arcnet_send_packet(struct sk_buff *skb,
 			       struct net_device *dev);
-void arcnet_timeout(struct net_device *dev);
+void arcnet_timeout(struct net_device *dev, unsigned int txqueue);
+
+static inline void arcnet_set_addr(struct net_device *dev, u8 addr)
+{
+	dev_addr_set(dev, &addr);
+}
 
 /* I/O equivalents */
 

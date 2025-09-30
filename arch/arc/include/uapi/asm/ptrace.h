@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  *
@@ -13,7 +14,7 @@
 
 #define PTRACE_GET_THREAD_AREA	25
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /*
  * Userspace ABI: Register state needed by
  *  -ptrace (gdbserver)
@@ -52,6 +53,6 @@ struct user_regs_arcv2 {
 	unsigned long r30, r58, r59;
 };
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* _UAPI__ASM_ARC_PTRACE_H */

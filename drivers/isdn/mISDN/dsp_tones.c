@@ -457,9 +457,9 @@ dsp_tone_hw_message(struct dsp *dsp, u8 *sample, int len)
  * timer expires *
  *****************/
 void
-dsp_tone_timeout(void *arg)
+dsp_tone_timeout(struct timer_list *t)
 {
-	struct dsp *dsp = arg;
+	struct dsp *dsp = timer_container_of(dsp, t, tone.tl);
 	struct dsp_tone *tone = &dsp->tone;
 	struct pattern *pat = (struct pattern *)tone->pattern;
 	int index = tone->index;
@@ -478,7 +478,6 @@ dsp_tone_timeout(void *arg)
 	else
 		dsp_tone_hw_message(dsp, pat->data[index], *(pat->siz[index]));
 	/* set timer */
-	init_timer(&tone->tl);
 	tone->tl.expires = jiffies + (pat->seq[index] * HZ) / 8000;
 	add_timer(&tone->tl);
 }
@@ -506,7 +505,7 @@ dsp_tone(struct dsp *dsp, int tone)
 	/* we turn off the tone */
 	if (!tone) {
 		if (dsp->features.hfc_loops && timer_pending(&tonet->tl))
-			del_timer(&tonet->tl);
+			timer_delete(&tonet->tl);
 		if (dsp->features.hfc_loops)
 			dsp_tone_hw_message(dsp, NULL, 0);
 		tonet->tone = 0;
@@ -540,8 +539,7 @@ dsp_tone(struct dsp *dsp, int tone)
 		dsp_tone_hw_message(dsp, pat->data[0], *(pat->siz[0]));
 		/* set timer */
 		if (timer_pending(&tonet->tl))
-			del_timer(&tonet->tl);
-		init_timer(&tonet->tl);
+			timer_delete(&tonet->tl);
 		tonet->tl.expires = jiffies + (pat->seq[0] * HZ) / 8000;
 		add_timer(&tonet->tl);
 	} else {

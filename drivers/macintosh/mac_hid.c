@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/macintosh/mac_hid.c
  *
@@ -15,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+MODULE_DESCRIPTION("Mouse button 2+3 emulation");
 MODULE_LICENSE("GPL");
 
 static int mouse_emulate_buttons;
@@ -181,9 +183,8 @@ static void mac_hid_stop_emulation(void)
 	mac_hid_destroy_emumouse();
 }
 
-static int mac_hid_toggle_emumouse(struct ctl_table *table, int write,
-				   void __user *buffer, size_t *lenp,
-				   loff_t *ppos)
+static int mac_hid_toggle_emumouse(const struct ctl_table *table, int write,
+				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int *valp = table->data;
 	int old_val = *valp;
@@ -214,7 +215,7 @@ static int mac_hid_toggle_emumouse(struct ctl_table *table, int write,
 }
 
 /* file(s) in /proc/sys/dev/mac_hid */
-static struct ctl_table mac_hid_files[] = {
+static const struct ctl_table mac_hid_files[] = {
 	{
 		.procname	= "mouse_button_emulation",
 		.data		= &mouse_emulate_buttons,
@@ -236,36 +237,13 @@ static struct ctl_table mac_hid_files[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-	{ }
-};
-
-/* dir in /proc/sys/dev */
-static struct ctl_table mac_hid_dir[] = {
-	{
-		.procname	= "mac_hid",
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= mac_hid_files,
-	},
-	{ }
-};
-
-/* /proc/sys/dev itself, in case that is not there yet */
-static struct ctl_table mac_hid_root_dir[] = {
-	{
-		.procname	= "dev",
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= mac_hid_dir,
-	},
-	{ }
 };
 
 static struct ctl_table_header *mac_hid_sysctl_header;
 
 static int __init mac_hid_init(void)
 {
-	mac_hid_sysctl_header = register_sysctl_table(mac_hid_root_dir);
+	mac_hid_sysctl_header = register_sysctl("dev/mac_hid", mac_hid_files);
 	if (!mac_hid_sysctl_header)
 		return -ENOMEM;
 

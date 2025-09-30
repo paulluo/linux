@@ -1,27 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * clk-xgene.c - AppliedMicro X-Gene Clock Interface
  *
  * Copyright (c) 2013, Applied Micro Circuits Corporation
  * Author: Loc Ho <lho@apm.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
- * MA 02111-1307 USA
- *
  */
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/string_choices.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/clkdev.h>
@@ -146,10 +132,8 @@ static struct clk *xgene_register_clk_pll(struct device *dev,
 
 	/* allocate the APM clock structure */
 	apmclk = kzalloc(sizeof(*apmclk), GFP_KERNEL);
-	if (!apmclk) {
-		pr_err("%s: could not allocate APM clk\n", __func__);
+	if (!apmclk)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	init.name = name;
 	init.ops = &xgene_clk_pll_ops;
@@ -191,7 +175,7 @@ static void xgene_pllclk_init(struct device_node *np, enum xgene_pll_type pll_ty
 	int version = xgene_pllclk_version(np);
 
 	reg = of_iomap(np, 0);
-	if (reg == NULL) {
+	if (!reg) {
 		pr_err("Unable to map CSR register for %pOF\n", np);
 		return;
 	}
@@ -223,17 +207,16 @@ static void xgene_pcppllclk_init(struct device_node *np)
  * @hw:		handle between common and hardware-specific interfaces
  * @reg:	register containing the fractional scale multiplier (scaler)
  * @shift:	shift to the unit bit field
+ * @mask:	mask to the unit bit field
  * @denom:	1/denominator unit
  * @lock:	register lock
- * Flags:
- * XGENE_CLK_PMD_SCALE_INVERTED - By default the scaler is the value read
+ * @flags: XGENE_CLK_PMD_SCALE_INVERTED - By default the scaler is the value read
  *	from the register plus one. For example,
  *		0 for (0 + 1) / denom,
  *		1 for (1 + 1) / denom and etc.
  *	If this flag is set, it is
  *		0 for (denom - 0) / denom,
  *		1 for (denom - 1) / denom and etc.
- *
  */
 struct xgene_clk_pmd {
 	struct clk_hw	hw;
@@ -264,7 +247,7 @@ static unsigned long xgene_clk_pmd_recalc_rate(struct clk_hw *hw,
 	else
 		__acquire(fd->lock);
 
-	val = clk_readl(fd->reg);
+	val = readl(fd->reg);
 
 	if (fd->lock)
 		spin_unlock_irqrestore(fd->lock, flags);
@@ -335,10 +318,10 @@ static int xgene_clk_pmd_set_rate(struct clk_hw *hw, unsigned long rate,
 	else
 		__acquire(fd->lock);
 
-	val = clk_readl(fd->reg);
+	val = readl(fd->reg);
 	val &= ~fd->mask;
 	val |= (scale << fd->shift);
-	clk_writel(val, fd->reg);
+	writel(val, fd->reg);
 
 	if (fd->lock)
 		spin_unlock_irqrestore(fd->lock, flags);
@@ -467,7 +450,7 @@ static int xgene_clk_enable(struct clk_hw *hw)
 	if (pclk->lock)
 		spin_lock_irqsave(pclk->lock, flags);
 
-	if (pclk->param.csr_reg != NULL) {
+	if (pclk->param.csr_reg) {
 		pr_debug("%s clock enabled\n", clk_hw_get_name(hw));
 		/* First enable the clock */
 		data = xgene_clk_read(pclk->param.csr_reg +
@@ -507,7 +490,7 @@ static void xgene_clk_disable(struct clk_hw *hw)
 	if (pclk->lock)
 		spin_lock_irqsave(pclk->lock, flags);
 
-	if (pclk->param.csr_reg != NULL) {
+	if (pclk->param.csr_reg) {
 		pr_debug("%s clock disabled\n", clk_hw_get_name(hw));
 		/* First put the CSR in reset */
 		data = xgene_clk_read(pclk->param.csr_reg +
@@ -533,17 +516,16 @@ static int xgene_clk_is_enabled(struct clk_hw *hw)
 	struct xgene_clk *pclk = to_xgene_clk(hw);
 	u32 data = 0;
 
-	if (pclk->param.csr_reg != NULL) {
+	if (pclk->param.csr_reg) {
 		pr_debug("%s clock checking\n", clk_hw_get_name(hw));
 		data = xgene_clk_read(pclk->param.csr_reg +
 					pclk->param.reg_clk_offset);
 		pr_debug("%s clock is %s\n", clk_hw_get_name(hw),
-			data & pclk->param.reg_clk_mask ? "enabled" :
-							"disabled");
+			str_enabled_disabled(data & pclk->param.reg_clk_mask));
+	} else {
+		return 1;
 	}
 
-	if (pclk->param.csr_reg == NULL)
-		return 1;
 	return data & pclk->param.reg_clk_mask ? 1 : 0;
 }
 
@@ -650,10 +632,8 @@ static struct clk *xgene_register_clk(struct device *dev,
 
 	/* allocate the APM clock structure */
 	apmclk = kzalloc(sizeof(*apmclk), GFP_KERNEL);
-	if (!apmclk) {
-		pr_err("%s: could not allocate APM clk\n", __func__);
+	if (!apmclk)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	init.name = name;
 	init.ops = &xgene_clk_ops;
@@ -709,7 +689,7 @@ static void __init xgene_devclk_init(struct device_node *np)
 			break;
 		}
 		map_res = of_iomap(np, i);
-		if (map_res == NULL) {
+		if (!map_res) {
 			pr_err("Unable to map resource %d for %pOF\n", i, np);
 			goto err;
 		}

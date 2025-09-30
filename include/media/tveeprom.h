@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 /*
  * tveeprom - Contains structures and functions to work with Hauppauge
  *	      eeproms.
  */
 
-#include <linux/if_ether.h>
+#include <uapi/linux/if_ether.h>
 
 /**
  * enum tveeprom_audio_processor - Specifies the type of audio processor

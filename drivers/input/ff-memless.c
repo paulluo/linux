@@ -1,24 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Force feedback support for memoryless devices
  *
  *  Copyright (c) 2006 Anssi Hannula <anssi.hannula@gmail.com>
  *  Copyright (c) 2006 Dmitry Torokhov <dtor@mail.ru>
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 /* #define DEBUG */
@@ -151,7 +136,7 @@ static void ml_schedule_timer(struct ml_device *ml)
 
 	if (!events) {
 		pr_debug("no actions\n");
-		del_timer(&ml->timer);
+		timer_delete(&ml->timer);
 	} else {
 		pr_debug("timer set\n");
 		mod_timer(&ml->timer, earliest);
@@ -412,17 +397,15 @@ static void ml_play_effects(struct ml_device *ml)
 	ml_schedule_timer(ml);
 }
 
-static void ml_effect_timer(unsigned long timer_data)
+static void ml_effect_timer(struct timer_list *t)
 {
-	struct input_dev *dev = (struct input_dev *)timer_data;
-	struct ml_device *ml = dev->ff->private;
-	unsigned long flags;
+	struct ml_device *ml = timer_container_of(ml, t, timer);
+	struct input_dev *dev = ml->dev;
 
 	pr_debug("timer: updating effects\n");
 
-	spin_lock_irqsave(&dev->event_lock, flags);
+	guard(spinlock_irqsave)(&dev->event_lock);
 	ml_play_effects(ml);
-	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
 
 /*
@@ -480,7 +463,7 @@ static int ml_ff_upload(struct input_dev *dev,
 	struct ml_device *ml = dev->ff->private;
 	struct ml_effect_state *state = &ml->states[effect->id];
 
-	spin_lock_irq(&dev->event_lock);
+	guard(spinlock_irq)(&dev->event_lock);
 
 	if (test_bit(FF_EFFECT_STARTED, &state->flags)) {
 		__clear_bit(FF_EFFECT_PLAYING, &state->flags);
@@ -492,14 +475,21 @@ static int ml_ff_upload(struct input_dev *dev,
 		ml_schedule_timer(ml);
 	}
 
-	spin_unlock_irq(&dev->event_lock);
-
 	return 0;
 }
 
 static void ml_ff_destroy(struct ff_device *ff)
 {
 	struct ml_device *ml = ff->private;
+
+	/*
+	 * Even though we stop all playing effects when tearing down
+	 * an input device (via input_device_flush() that calls into
+	 * input_ff_flush() that stops and erases all effects), we
+	 * do not actually stop the timer, and therefore we should
+	 * do it here.
+	 */
+	timer_delete_sync(&ml->timer);
 
 	kfree(ml->private);
 }
@@ -513,12 +503,11 @@ static void ml_ff_destroy(struct ff_device *ff)
 int input_ff_create_memless(struct input_dev *dev, void *data,
 		int (*play_effect)(struct input_dev *, void *, struct ff_effect *))
 {
-	struct ml_device *ml;
 	struct ff_device *ff;
 	int error;
 	int i;
 
-	ml = kzalloc(sizeof(struct ml_device), GFP_KERNEL);
+	struct ml_device *ml __free(kfree) = kzalloc(sizeof(*ml), GFP_KERNEL);
 	if (!ml)
 		return -ENOMEM;
 
@@ -526,18 +515,15 @@ int input_ff_create_memless(struct input_dev *dev, void *data,
 	ml->private = data;
 	ml->play_effect = play_effect;
 	ml->gain = 0xffff;
-	setup_timer(&ml->timer, ml_effect_timer, (unsigned long)dev);
+	timer_setup(&ml->timer, ml_effect_timer, 0);
 
 	set_bit(FF_GAIN, dev->ffbit);
 
 	error = input_ff_create(dev, FF_MEMLESS_EFFECTS);
-	if (error) {
-		kfree(ml);
+	if (error)
 		return error;
-	}
 
 	ff = dev->ff;
-	ff->private = ml;
 	ff->upload = ml_ff_upload;
 	ff->playback = ml_ff_playback;
 	ff->set_gain = ml_ff_set_gain;
@@ -553,6 +539,8 @@ int input_ff_create_memless(struct input_dev *dev, void *data,
 
 	for (i = 0; i < FF_MEMLESS_EFFECTS; i++)
 		ml->states[i].effect = &ff->effects[i];
+
+	ff->private = no_free_ptr(ml);
 
 	return 0;
 }

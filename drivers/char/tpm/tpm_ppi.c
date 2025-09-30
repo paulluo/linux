@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012-2014 Intel Corporation
  *
@@ -9,18 +10,14 @@
  * Maintained by: <tpmdd-devel@lists.sourceforge.net>
  *
  * This file contains implementation of the sysfs interface for PPI.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; version 2
- * of the License.
  */
 
 
 #include <linux/acpi.h>
 #include "tpm.h"
 
-#define TPM_PPI_REVISION_ID	1
+#define TPM_PPI_REVISION_ID_1	1
+#define TPM_PPI_REVISION_ID_2	2
 #define TPM_PPI_FN_VERSION	1
 #define TPM_PPI_FN_SUBREQ	2
 #define TPM_PPI_FN_GETREQ	3
@@ -28,7 +25,7 @@
 #define TPM_PPI_FN_GETRSP	5
 #define TPM_PPI_FN_SUBREQ2	7
 #define TPM_PPI_FN_GETOPR	8
-#define PPI_TPM_REQ_MAX		22
+#define PPI_TPM_REQ_MAX		101 /* PPI 1.3 for TPM 2 */
 #define PPI_VS_REQ_START	128
 #define PPI_VS_REQ_END		255
 
@@ -36,14 +33,18 @@ static const guid_t tpm_ppi_guid =
 	GUID_INIT(0x3DDDFAA6, 0x361B, 0x4EB4,
 		  0xA4, 0x24, 0x8D, 0x10, 0x08, 0x9D, 0x16, 0x53);
 
+static bool tpm_ppi_req_has_parameter(u64 req)
+{
+	return req == 23;
+}
+
 static inline union acpi_object *
 tpm_eval_dsm(acpi_handle ppi_handle, int func, acpi_object_type type,
-	     union acpi_object *argv4)
+	     union acpi_object *argv4, u64 rev)
 {
 	BUG_ON(!ppi_handle);
 	return acpi_evaluate_dsm_typed(ppi_handle, &tpm_ppi_guid,
-				       TPM_PPI_REVISION_ID,
-				       func, argv4, type);
+				       rev, func, argv4, type);
 }
 
 static ssize_t tpm_show_ppi_version(struct device *dev,
@@ -51,7 +52,7 @@ static ssize_t tpm_show_ppi_version(struct device *dev,
 {
 	struct tpm_chip *chip = to_tpm_chip(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%s\n", chip->ppi_version);
+	return sysfs_emit(buf, "%s\n", chip->ppi_version);
 }
 
 static ssize_t tpm_show_ppi_request(struct device *dev,
@@ -60,9 +61,14 @@ static ssize_t tpm_show_ppi_request(struct device *dev,
 	ssize_t size = -EINVAL;
 	union acpi_object *obj;
 	struct tpm_chip *chip = to_tpm_chip(dev);
+	u64 rev = TPM_PPI_REVISION_ID_2;
+	u64 req;
+
+	if (strcmp(chip->ppi_version, "1.2") < 0)
+		rev = TPM_PPI_REVISION_ID_1;
 
 	obj = tpm_eval_dsm(chip->acpi_dev_handle, TPM_PPI_FN_GETREQ,
-			   ACPI_TYPE_PACKAGE, NULL);
+			   ACPI_TYPE_PACKAGE, NULL, rev);
 	if (!obj)
 		return -ENXIO;
 
@@ -72,14 +78,28 @@ static ssize_t tpm_show_ppi_request(struct device *dev,
 	 * error. The second is pending TPM operation requested by the OS, 0
 	 * means none and >0 means operation value.
 	 */
-	if (obj->package.count == 2 &&
+	if (obj->package.count == 3 &&
+	    obj->package.elements[0].type == ACPI_TYPE_INTEGER &&
+	    obj->package.elements[1].type == ACPI_TYPE_INTEGER &&
+	    obj->package.elements[2].type == ACPI_TYPE_INTEGER) {
+		if (obj->package.elements[0].integer.value)
+			size = -EFAULT;
+		else {
+			req = obj->package.elements[1].integer.value;
+			if (tpm_ppi_req_has_parameter(req))
+				size = sysfs_emit(buf, "%llu %llu\n", req,
+						  obj->package.elements[2].integer.value);
+			else
+				size = sysfs_emit(buf, "%llu\n", req);
+		}
+	} else if (obj->package.count == 2 &&
 	    obj->package.elements[0].type == ACPI_TYPE_INTEGER &&
 	    obj->package.elements[1].type == ACPI_TYPE_INTEGER) {
 		if (obj->package.elements[0].integer.value)
 			size = -EFAULT;
 		else
-			size = scnprintf(buf, PAGE_SIZE, "%llu\n",
-				 obj->package.elements[1].integer.value);
+			size = sysfs_emit(buf, "%llu\n",
+					  obj->package.elements[1].integer.value);
 	}
 
 	ACPI_FREE(obj);
@@ -94,9 +114,10 @@ static ssize_t tpm_store_ppi_request(struct device *dev,
 	u32 req;
 	u64 ret;
 	int func = TPM_PPI_FN_SUBREQ;
-	union acpi_object *obj, tmp;
-	union acpi_object argv4 = ACPI_INIT_DSM_ARGV4(1, &tmp);
+	union acpi_object *obj, tmp[2];
+	union acpi_object argv4 = ACPI_INIT_DSM_ARGV4(2, tmp);
 	struct tpm_chip *chip = to_tpm_chip(dev);
+	u64 rev = TPM_PPI_REVISION_ID_1;
 
 	/*
 	 * the function to submit TPM operation request to pre-os environment
@@ -104,7 +125,7 @@ static ssize_t tpm_store_ppi_request(struct device *dev,
 	 * version 1.1
 	 */
 	if (acpi_check_dsm(chip->acpi_dev_handle, &tpm_ppi_guid,
-			   TPM_PPI_REVISION_ID, 1 << TPM_PPI_FN_SUBREQ2))
+			   TPM_PPI_REVISION_ID_1, 1 << TPM_PPI_FN_SUBREQ2))
 		func = TPM_PPI_FN_SUBREQ2;
 
 	/*
@@ -113,20 +134,29 @@ static ssize_t tpm_store_ppi_request(struct device *dev,
 	 * string/package type. For PPI version 1.0 and 1.1, use buffer type
 	 * for compatibility, and use package type since 1.2 according to spec.
 	 */
-	if (strcmp(chip->ppi_version, "1.2") < 0) {
+	if (strcmp(chip->ppi_version, "1.3") == 0) {
+		if (sscanf(buf, "%llu %llu", &tmp[0].integer.value,
+			   &tmp[1].integer.value) != 2)
+			goto ppi12;
+		rev = TPM_PPI_REVISION_ID_2;
+		tmp[0].type = ACPI_TYPE_INTEGER;
+		tmp[1].type = ACPI_TYPE_INTEGER;
+	} else if (strcmp(chip->ppi_version, "1.2") < 0) {
 		if (sscanf(buf, "%d", &req) != 1)
 			return -EINVAL;
 		argv4.type = ACPI_TYPE_BUFFER;
 		argv4.buffer.length = sizeof(req);
 		argv4.buffer.pointer = (u8 *)&req;
 	} else {
-		tmp.type = ACPI_TYPE_INTEGER;
-		if (sscanf(buf, "%llu", &tmp.integer.value) != 1)
+ppi12:
+		argv4.package.count = 1;
+		tmp[0].type = ACPI_TYPE_INTEGER;
+		if (sscanf(buf, "%llu", &tmp[0].integer.value) != 1)
 			return -EINVAL;
 	}
 
 	obj = tpm_eval_dsm(chip->acpi_dev_handle, func, ACPI_TYPE_INTEGER,
-			   &argv4);
+			   &argv4, rev);
 	if (!obj) {
 		return -ENXIO;
 	} else {
@@ -170,7 +200,7 @@ static ssize_t tpm_show_ppi_transition_action(struct device *dev,
 	if (strcmp(chip->ppi_version, "1.2") < 0)
 		obj = &tmp;
 	obj = tpm_eval_dsm(chip->acpi_dev_handle, TPM_PPI_FN_GETACT,
-			   ACPI_TYPE_INTEGER, obj);
+			   ACPI_TYPE_INTEGER, obj, TPM_PPI_REVISION_ID_1);
 	if (!obj) {
 		return -ENXIO;
 	} else {
@@ -179,10 +209,10 @@ static ssize_t tpm_show_ppi_transition_action(struct device *dev,
 	}
 
 	if (ret < ARRAY_SIZE(info) - 1)
-		status = scnprintf(buf, PAGE_SIZE, "%d: %s\n", ret, info[ret]);
+		status = sysfs_emit(buf, "%d: %s\n", ret, info[ret]);
 	else
-		status = scnprintf(buf, PAGE_SIZE, "%d: %s\n", ret,
-				   info[ARRAY_SIZE(info)-1]);
+		status = sysfs_emit(buf, "%d: %s\n", ret,
+				    info[ARRAY_SIZE(info) - 1]);
 	return status;
 }
 
@@ -196,7 +226,7 @@ static ssize_t tpm_show_ppi_response(struct device *dev,
 	struct tpm_chip *chip = to_tpm_chip(dev);
 
 	obj = tpm_eval_dsm(chip->acpi_dev_handle, TPM_PPI_FN_GETRSP,
-			   ACPI_TYPE_PACKAGE, NULL);
+			   ACPI_TYPE_PACKAGE, NULL, TPM_PPI_REVISION_ID_1);
 	if (!obj)
 		return -ENXIO;
 
@@ -223,23 +253,23 @@ static ssize_t tpm_show_ppi_response(struct device *dev,
 	res = ret_obj[2].integer.value;
 	if (req) {
 		if (res == 0)
-			status = scnprintf(buf, PAGE_SIZE, "%llu %s\n", req,
-					   "0: Success");
+			status = sysfs_emit(buf, "%llu %s\n", req,
+					    "0: Success");
 		else if (res == 0xFFFFFFF0)
-			status = scnprintf(buf, PAGE_SIZE, "%llu %s\n", req,
-					   "0xFFFFFFF0: User Abort");
+			status = sysfs_emit(buf, "%llu %s\n", req,
+					    "0xFFFFFFF0: User Abort");
 		else if (res == 0xFFFFFFF1)
-			status = scnprintf(buf, PAGE_SIZE, "%llu %s\n", req,
-					   "0xFFFFFFF1: BIOS Failure");
+			status = sysfs_emit(buf, "%llu %s\n", req,
+					    "0xFFFFFFF1: BIOS Failure");
 		else if (res >= 1 && res <= 0x00000FFF)
-			status = scnprintf(buf, PAGE_SIZE, "%llu %llu: %s\n",
-					   req, res, "Corresponding TPM error");
+			status = sysfs_emit(buf, "%llu %llu: %s\n",
+					    req, res, "Corresponding TPM error");
 		else
-			status = scnprintf(buf, PAGE_SIZE, "%llu %llu: %s\n",
-					   req, res, "Error");
+			status = sysfs_emit(buf, "%llu %llu: %s\n",
+					    req, res, "Error");
 	} else {
-		status = scnprintf(buf, PAGE_SIZE, "%llu: %s\n",
-				   req, "No Recent Request");
+		status = sysfs_emit(buf, "%llu: %s\n",
+				    req, "No Recent Request");
 	}
 
 cleanup:
@@ -252,7 +282,7 @@ static ssize_t show_ppi_operations(acpi_handle dev_handle, char *buf, u32 start,
 {
 	int i;
 	u32 ret;
-	char *str = buf;
+	int len = 0;
 	union acpi_object *obj, tmp;
 	union acpi_object argv = ACPI_INIT_DSM_ARGV4(1, &tmp);
 
@@ -264,7 +294,7 @@ static ssize_t show_ppi_operations(acpi_handle dev_handle, char *buf, u32 start,
 		"User not required",
 	};
 
-	if (!acpi_check_dsm(dev_handle, &tpm_ppi_guid, TPM_PPI_REVISION_ID,
+	if (!acpi_check_dsm(dev_handle, &tpm_ppi_guid, TPM_PPI_REVISION_ID_1,
 			    1 << TPM_PPI_FN_GETOPR))
 		return -EPERM;
 
@@ -272,7 +302,8 @@ static ssize_t show_ppi_operations(acpi_handle dev_handle, char *buf, u32 start,
 	for (i = start; i <= end; i++) {
 		tmp.integer.value = i;
 		obj = tpm_eval_dsm(dev_handle, TPM_PPI_FN_GETOPR,
-				   ACPI_TYPE_INTEGER, &argv);
+				   ACPI_TYPE_INTEGER, &argv,
+				   TPM_PPI_REVISION_ID_1);
 		if (!obj) {
 			return -ENOMEM;
 		} else {
@@ -281,11 +312,11 @@ static ssize_t show_ppi_operations(acpi_handle dev_handle, char *buf, u32 start,
 		}
 
 		if (ret > 0 && ret < ARRAY_SIZE(info))
-			str += scnprintf(str, PAGE_SIZE, "%d %d: %s\n",
-					 i, ret, info[ret]);
+			len += sysfs_emit_at(buf, len, "%d %d: %s\n",
+					     i, ret, info[ret]);
 	}
 
-	return str - buf;
+	return len;
 }
 
 static ssize_t tpm_show_ppi_tcg_operations(struct device *dev,
@@ -325,7 +356,7 @@ static struct attribute *ppi_attrs[] = {
 	&dev_attr_tcg_operations.attr,
 	&dev_attr_vs_operations.attr, NULL,
 };
-static struct attribute_group ppi_attr_grp = {
+static const struct attribute_group ppi_attr_grp = {
 	.name = "ppi",
 	.attrs = ppi_attrs
 };
@@ -338,15 +369,16 @@ void tpm_add_ppi(struct tpm_chip *chip)
 		return;
 
 	if (!acpi_check_dsm(chip->acpi_dev_handle, &tpm_ppi_guid,
-			    TPM_PPI_REVISION_ID, 1 << TPM_PPI_FN_VERSION))
+			    TPM_PPI_REVISION_ID_1, 1 << TPM_PPI_FN_VERSION))
 		return;
 
 	/* Cache PPI version string. */
 	obj = acpi_evaluate_dsm_typed(chip->acpi_dev_handle, &tpm_ppi_guid,
-				      TPM_PPI_REVISION_ID, TPM_PPI_FN_VERSION,
+				      TPM_PPI_REVISION_ID_1,
+				      TPM_PPI_FN_VERSION,
 				      NULL, ACPI_TYPE_STRING);
 	if (obj) {
-		strlcpy(chip->ppi_version, obj->string.pointer,
+		strscpy(chip->ppi_version, obj->string.pointer,
 			sizeof(chip->ppi_version));
 		ACPI_FREE(obj);
 	}

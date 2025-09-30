@@ -2,14 +2,6 @@
 The Linux Kernel API
 ====================
 
-Data Types
-==========
-
-Doubly Linked Lists
--------------------
-
-.. kernel-doc:: include/linux/list.h
-   :internal:
 
 Basic C Library Functions
 =========================
@@ -26,39 +18,70 @@ String Conversions
 .. kernel-doc:: lib/vsprintf.c
    :export:
 
-.. kernel-doc:: include/linux/kernel.h
-   :functions: kstrtol
-
-.. kernel-doc:: include/linux/kernel.h
-   :functions: kstrtoul
+.. kernel-doc:: include/linux/kstrtox.h
+   :functions: kstrtol kstrtoul
 
 .. kernel-doc:: lib/kstrtox.c
+   :export:
+
+.. kernel-doc:: lib/string_helpers.c
    :export:
 
 String Manipulation
 -------------------
 
+.. kernel-doc:: include/linux/fortify-string.h
+   :internal:
+
 .. kernel-doc:: lib/string.c
    :export:
 
-Bit Operations
---------------
-
-.. kernel-doc:: arch/x86/include/asm/bitops.h
+.. kernel-doc:: include/linux/string.h
    :internal:
+
+.. kernel-doc:: mm/util.c
+   :functions: kstrdup kstrdup_const kstrndup kmemdup kmemdup_nul memdup_user
+               vmemdup_user strndup_user memdup_user_nul
 
 Basic Kernel Library Functions
 ==============================
 
 The Linux kernel provides more basic utility functions.
 
+Bit Operations
+--------------
+
+.. kernel-doc:: include/asm-generic/bitops/instrumented-atomic.h
+   :internal:
+
+.. kernel-doc:: include/asm-generic/bitops/instrumented-non-atomic.h
+   :internal:
+
+.. kernel-doc:: include/asm-generic/bitops/instrumented-lock.h
+   :internal:
+
 Bitmap Operations
 -----------------
+
+.. kernel-doc:: lib/bitmap.c
+   :doc: bitmap introduction
+
+.. kernel-doc:: include/linux/bitmap.h
+   :doc: declare bitmap
+
+.. kernel-doc:: include/linux/bitmap.h
+   :doc: bitmap overview
+
+.. kernel-doc:: include/linux/bitmap.h
+   :doc: bitmap bitops
 
 .. kernel-doc:: lib/bitmap.c
    :export:
 
 .. kernel-doc:: lib/bitmap.c
+   :internal:
+
+.. kernel-doc:: include/linux/bitmap.h
    :internal:
 
 Command-line Parsing
@@ -67,87 +90,101 @@ Command-line Parsing
 .. kernel-doc:: lib/cmdline.c
    :export:
 
+Error Pointers
+--------------
+
+.. kernel-doc:: include/linux/err.h
+   :internal:
+
+Sorting
+-------
+
+.. kernel-doc:: lib/sort.c
+   :export:
+
+.. kernel-doc:: lib/list_sort.c
+   :export:
+
+Text Searching
+--------------
+
+.. kernel-doc:: lib/textsearch.c
+   :doc: ts_intro
+
+.. kernel-doc:: lib/textsearch.c
+   :export:
+
+.. kernel-doc:: include/linux/textsearch.h
+   :functions: textsearch_find textsearch_next \
+               textsearch_get_pattern textsearch_get_pattern_len
+
+CRC and Math Functions in Linux
+===============================
+
+Arithmetic Overflow Checking
+----------------------------
+
+.. kernel-doc:: include/linux/overflow.h
+   :internal:
+
 CRC Functions
 -------------
 
-.. kernel-doc:: lib/crc7.c
+.. kernel-doc:: lib/crc/crc4.c
    :export:
 
-.. kernel-doc:: lib/crc16.c
+.. kernel-doc:: lib/crc/crc7.c
    :export:
 
-.. kernel-doc:: lib/crc-itu-t.c
+.. kernel-doc:: lib/crc/crc8.c
    :export:
 
-.. kernel-doc:: lib/crc32.c
-
-.. kernel-doc:: lib/crc-ccitt.c
+.. kernel-doc:: lib/crc/crc16.c
    :export:
 
-idr/ida Functions
------------------
-
-.. kernel-doc:: include/linux/idr.h
-   :doc: idr sync
-
-.. kernel-doc:: lib/idr.c
-   :doc: IDA description
-
-.. kernel-doc:: lib/idr.c
+.. kernel-doc:: lib/crc/crc-ccitt.c
    :export:
 
-Memory Management in Linux
-==========================
+.. kernel-doc:: lib/crc/crc-itu-t.c
+   :export:
 
-The Slab Cache
---------------
+.. kernel-doc:: include/linux/crc32.h
 
-.. kernel-doc:: include/linux/slab.h
+.. kernel-doc:: include/linux/crc64.h
+
+Base 2 log and power Functions
+------------------------------
+
+.. kernel-doc:: include/linux/log2.h
    :internal:
 
-.. kernel-doc:: mm/slab.c
+Integer log and power Functions
+-------------------------------
+
+.. kernel-doc:: include/linux/int_log.h
+
+.. kernel-doc:: lib/math/int_pow.c
    :export:
 
-.. kernel-doc:: mm/util.c
+.. kernel-doc:: lib/math/int_sqrt.c
    :export:
 
-User Space Memory Access
-------------------------
+Division Functions
+------------------
 
-.. kernel-doc:: arch/x86/include/asm/uaccess.h
+.. kernel-doc:: include/asm-generic/div64.h
+   :functions: do_div
+
+.. kernel-doc:: include/linux/math64.h
    :internal:
 
-.. kernel-doc:: arch/x86/lib/usercopy_32.c
+.. kernel-doc:: lib/math/gcd.c
    :export:
 
-More Memory Management Functions
---------------------------------
+UUID/GUID
+---------
 
-.. kernel-doc:: mm/readahead.c
-   :export:
-
-.. kernel-doc:: mm/filemap.c
-   :export:
-
-.. kernel-doc:: mm/memory.c
-   :export:
-
-.. kernel-doc:: mm/vmalloc.c
-   :export:
-
-.. kernel-doc:: mm/page_alloc.c
-   :internal:
-
-.. kernel-doc:: mm/mempool.c
-   :export:
-
-.. kernel-doc:: mm/dmapool.c
-   :export:
-
-.. kernel-doc:: mm/page-writeback.c
-   :export:
-
-.. kernel-doc:: mm/truncate.c
+.. kernel-doc:: lib/uuid.c
    :export:
 
 Kernel IPC facilities
@@ -187,25 +224,37 @@ relay interface
 Module Support
 ==============
 
-Module Loading
---------------
+Kernel module auto-loading
+--------------------------
 
-.. kernel-doc:: kernel/kmod.c
+.. kernel-doc:: kernel/module/kmod.c
    :export:
+
+Module debugging
+----------------
+
+.. kernel-doc:: kernel/module/stats.c
+   :doc: module debugging statistics overview
+
+dup_failed_modules - tracks duplicate failed modules
+****************************************************
+
+.. kernel-doc:: kernel/module/stats.c
+   :doc: dup_failed_modules - tracks duplicate failed modules
+
+module statistics debugfs counters
+**********************************
+
+.. kernel-doc:: kernel/module/stats.c
+   :doc: module statistics debugfs counters
 
 Inter Module support
 --------------------
 
-Refer to the file kernel/module.c for more information.
+Refer to the files in kernel/module/ for more information.
 
 Hardware Interfaces
 ===================
-
-Interrupt Handling
-------------------
-
-.. kernel-doc:: kernel/irq/manage.c
-   :export:
 
 DMA Channels
 ------------
@@ -225,7 +274,7 @@ Resources Management
 MTRR Handling
 -------------
 
-.. kernel-doc:: arch/x86/kernel/cpu/mtrr/main.c
+.. kernel-doc:: arch/x86/kernel/cpu/mtrr/mtrr.c
    :export:
 
 Security Framework
@@ -258,6 +307,7 @@ Accounting Framework
 Block Devices
 =============
 
+.. kernel-doc:: include/linux/bio.h
 .. kernel-doc:: block/blk-core.c
    :export:
 
@@ -273,20 +323,11 @@ Block Devices
 .. kernel-doc:: block/blk-settings.c
    :export:
 
-.. kernel-doc:: block/blk-exec.c
-   :export:
-
 .. kernel-doc:: block/blk-flush.c
    :export:
 
 .. kernel-doc:: block/blk-lib.c
    :export:
-
-.. kernel-doc:: block/blk-tag.c
-   :export:
-
-.. kernel-doc:: block/blk-tag.c
-   :internal:
 
 .. kernel-doc:: block/blk-integrity.c
    :export:
@@ -298,6 +339,9 @@ Block Devices
    :internal:
 
 .. kernel-doc:: block/genhd.c
+   :export:
+
+.. kernel-doc:: block/bdev.c
    :export:
 
 Char devices
@@ -352,44 +396,35 @@ Read-Copy Update (RCU)
 ----------------------
 
 .. kernel-doc:: include/linux/rcupdate.h
-   :external:
-
-.. kernel-doc:: include/linux/rcupdate_wait.h
-   :external:
-
-.. kernel-doc:: include/linux/rcutree.h
-   :external:
 
 .. kernel-doc:: kernel/rcu/tree.c
-   :external:
-
-.. kernel-doc:: kernel/rcu/tree_plugin.h
-   :external:
 
 .. kernel-doc:: kernel/rcu/tree_exp.h
-   :external:
 
 .. kernel-doc:: kernel/rcu/update.c
-   :external:
 
 .. kernel-doc:: include/linux/srcu.h
-   :external:
 
 .. kernel-doc:: kernel/rcu/srcutree.c
-   :external:
 
 .. kernel-doc:: include/linux/rculist_bl.h
-   :external:
 
 .. kernel-doc:: include/linux/rculist.h
-   :external:
 
 .. kernel-doc:: include/linux/rculist_nulls.h
-   :external:
 
 .. kernel-doc:: include/linux/rcu_sync.h
-   :external:
 
 .. kernel-doc:: kernel/rcu/sync.c
-   :external:
 
+.. kernel-doc:: kernel/rcu/tasks.h
+
+.. kernel-doc:: kernel/rcu/tree_stall.h
+
+.. kernel-doc:: include/linux/rcupdate_trace.h
+
+.. kernel-doc:: include/linux/rcupdate_wait.h
+
+.. kernel-doc:: include/linux/rcuref.h
+
+.. kernel-doc:: include/linux/rcutree.h

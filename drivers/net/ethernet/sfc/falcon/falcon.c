@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
  * Copyright 2006-2013 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
  */
 
 #include <linux/bitops.h>
@@ -370,7 +367,7 @@ static const struct i2c_algo_bit_data falcon_i2c_bit_operations = {
 	.getsda		= falcon_getsda,
 	.getscl		= falcon_getscl,
 	.udelay		= 5,
-	/* Wait up to 50 ms for slave to let us pull SCL high */
+	/* Wait up to 50 ms for target to let us pull SCL high */
 	.timeout	= DIV_ROUND_UP(HZ, 20),
 };
 
@@ -452,7 +449,7 @@ static irqreturn_t falcon_legacy_interrupt_a1(int irq, void *dev_id)
 		   "IRQ %d on CPU %d status " EF4_OWORD_FMT "\n",
 		   irq, raw_smp_processor_id(), EF4_OWORD_VAL(*int_ker));
 
-	if (!likely(ACCESS_ONCE(efx->irq_soft_enabled)))
+	if (!likely(READ_ONCE(efx->irq_soft_enabled)))
 		return IRQ_HANDLED;
 
 	/* Check to see if we have a serious error condition */
@@ -1372,7 +1369,7 @@ static void falcon_reconfigure_mac_wrapper(struct ef4_nic *efx)
 	ef4_oword_t reg;
 	int link_speed, isolate;
 
-	isolate = !!ACCESS_ONCE(efx->reset_pending);
+	isolate = !!READ_ONCE(efx->reset_pending);
 
 	switch (link_state->speed) {
 	case 10000: link_speed = 3; break;
@@ -1454,10 +1451,11 @@ static void falcon_stats_complete(struct ef4_nic *efx)
 	}
 }
 
-static void falcon_stats_timer_func(unsigned long context)
+static void falcon_stats_timer_func(struct timer_list *t)
 {
-	struct ef4_nic *efx = (struct ef4_nic *)context;
-	struct falcon_nic_data *nic_data = efx->nic_data;
+	struct falcon_nic_data *nic_data = timer_container_of(nic_data, t,
+							      stats_timer);
+	struct ef4_nic *efx = nic_data->efx;
 
 	spin_lock(&efx->stats_lock);
 
@@ -2295,6 +2293,7 @@ static int falcon_probe_nic(struct ef4_nic *efx)
 	if (!nic_data)
 		return -ENOMEM;
 	efx->nic_data = nic_data;
+	nic_data->efx = efx;
 
 	rc = -ENODEV;
 
@@ -2388,7 +2387,7 @@ static int falcon_probe_nic(struct ef4_nic *efx)
 	board->i2c_data.data = efx;
 	board->i2c_adap.algo_data = &board->i2c_data;
 	board->i2c_adap.dev.parent = &efx->pci_dev->dev;
-	strlcpy(board->i2c_adap.name, "SFC4000 GPIO",
+	strscpy(board->i2c_adap.name, "SFC4000 GPIO",
 		sizeof(board->i2c_adap.name));
 	rc = i2c_bit_add_bus(&board->i2c_adap);
 	if (rc)
@@ -2402,8 +2401,7 @@ static int falcon_probe_nic(struct ef4_nic *efx)
 	}
 
 	nic_data->stats_disable_count = 1;
-	setup_timer(&nic_data->stats_timer, &falcon_stats_timer_func,
-		    (unsigned long)efx);
+	timer_setup(&nic_data->stats_timer, falcon_stats_timer_func, 0);
 
 	return 0;
 
@@ -2566,7 +2564,7 @@ static void falcon_remove_nic(struct ef4_nic *efx)
 	efx->nic_data = NULL;
 }
 
-static size_t falcon_describe_nic_stats(struct ef4_nic *efx, u8 *names)
+static size_t falcon_describe_nic_stats(struct ef4_nic *efx, u8 **names)
 {
 	return ef4_nic_describe_stats(falcon_stat_desc, FALCON_STAT_COUNT,
 				      falcon_stat_mask, names);
@@ -2659,7 +2657,7 @@ void falcon_stop_nic_stats(struct ef4_nic *efx)
 	++nic_data->stats_disable_count;
 	spin_unlock_bh(&efx->stats_lock);
 
-	del_timer_sync(&nic_data->stats_timer);
+	timer_delete_sync(&nic_data->stats_timer);
 
 	/* Wait enough time for the most recent transfer to
 	 * complete. */

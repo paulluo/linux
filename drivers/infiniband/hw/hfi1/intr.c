@@ -1,48 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015, 2016 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #include <linux/pci.h>
@@ -53,35 +11,40 @@
 #include "common.h"
 #include "sdma.h"
 
-/**
- * format_hwmsg - format a single hwerror message
- * @msg message buffer
- * @msgl length of message buffer
- * @hwmsg message to add to message buffer
- */
-static void format_hwmsg(char *msg, size_t msgl, const char *hwmsg)
+#define LINK_UP_DELAY  500  /* in microseconds */
+
+static void set_mgmt_allowed(struct hfi1_pportdata *ppd)
 {
-	strlcat(msg, "[", msgl);
-	strlcat(msg, hwmsg, msgl);
-	strlcat(msg, "]", msgl);
+	u32 frame;
+	struct hfi1_devdata *dd = ppd->dd;
+
+	if (ppd->neighbor_type == NEIGHBOR_TYPE_HFI) {
+		ppd->mgmt_allowed = 1;
+	} else {
+		read_8051_config(dd, REMOTE_LNI_INFO, GENERAL_CONFIG, &frame);
+		ppd->mgmt_allowed = (frame >> MGMT_ALLOWED_SHIFT)
+		& MGMT_ALLOWED_MASK;
+	}
 }
 
-/**
- * hfi1_format_hwerrors - format hardware error messages for display
- * @hwerrs hardware errors bit vector
- * @hwerrmsgs hardware error descriptions
- * @nhwerrmsgs number of hwerrmsgs
- * @msg message buffer
- * @msgl message buffer length
+/*
+ * Our neighbor has indicated that we are allowed to act as a fabric
+ * manager, so place the full management partition key in the second
+ * (0-based) pkey array position. Note that we should already have
+ * the limited management partition key in array element 1, and also
+ * that the port is not yet up when add_full_mgmt_pkey() is invoked.
  */
-void hfi1_format_hwerrors(u64 hwerrs, const struct hfi1_hwerror_msgs *hwerrmsgs,
-			  size_t nhwerrmsgs, char *msg, size_t msgl)
+static void add_full_mgmt_pkey(struct hfi1_pportdata *ppd)
 {
-	int i;
+	struct hfi1_devdata *dd = ppd->dd;
 
-	for (i = 0; i < nhwerrmsgs; i++)
-		if (hwerrs & hwerrmsgs[i].mask)
-			format_hwmsg(msg, msgl, hwerrmsgs[i].msg);
+	/* Sanity check - ppd->pkeys[2] should be 0, or already initialized */
+	if (!((ppd->pkeys[2] == 0) || (ppd->pkeys[2] == FULL_MGMT_P_KEY)))
+		dd_dev_warn(dd, "%s pkey[2] already set to 0x%x, resetting it to 0x%x\n",
+			    __func__, ppd->pkeys[2], FULL_MGMT_P_KEY);
+	ppd->pkeys[2] = FULL_MGMT_P_KEY;
+	(void)hfi1_set_ib_cfg(ppd, HFI1_IB_CFG_PKEYS, 0);
+	hfi1_event_pkey_change(ppd->dd, ppd->port);
 }
 
 static void signal_ib_event(struct hfi1_pportdata *ppd, enum ib_event_type ev)
@@ -102,9 +65,16 @@ static void signal_ib_event(struct hfi1_pportdata *ppd, enum ib_event_type ev)
 	ib_dispatch_event(&event);
 }
 
-/*
+/**
+ * handle_linkup_change - finish linkup/down state changes
+ * @dd: valid device
+ * @linkup: link state information
+ *
  * Handle a linkup or link down notification.
+ * The HW needs time to finish its link up state change. Give it that chance.
+ *
  * This is called outside an interrupt.
+ *
  */
 void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 {
@@ -150,6 +120,18 @@ void handle_linkup_change(struct hfi1_devdata *dd, u32 linkup)
 			    "Neighbor Guid %llx, Type %d, Port Num %d\n",
 			    ppd->neighbor_guid, ppd->neighbor_type,
 			    ppd->neighbor_port_number);
+
+		/* HW needs LINK_UP_DELAY to settle, give it that chance */
+		udelay(LINK_UP_DELAY);
+
+		/*
+		 * 'MgmtAllowed' information, which is exchanged during
+		 * LNI, is available at this point.
+		 */
+		set_mgmt_allowed(ppd);
+
+		if (ppd->mgmt_allowed)
+			add_full_mgmt_pkey(ppd);
 
 		/* physical link went up */
 		ppd->linkup = 1;

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ImgTec IR Hardware Decoder found in PowerDown Controller.
  *
  * Copyright 2010-2014 Imagination Technologies Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  *
  * This ties into the input subsystem using the RC-core. Protocol support is
  * provided in separate modules which provide the parameters and scancode
@@ -339,7 +335,7 @@ static void img_ir_decoder_preprocess(struct img_ir_decoder *decoder)
 /**
  * img_ir_decoder_convert() - Generate internal timings in decoder.
  * @decoder:	Decoder to be converted to internal timings.
- * @timings:	Timing register values.
+ * @reg_timings: Timing register values.
  * @clock_hz:	IR clock rate in Hz.
  *
  * Fills out the repeat timings and timing register values for a specific clock
@@ -560,8 +556,8 @@ static void img_ir_set_decoder(struct img_ir_priv *priv,
 	 * acquires the lock and we don't want to deadlock waiting for it.
 	 */
 	spin_unlock_irq(&priv->lock);
-	del_timer_sync(&hw->end_timer);
-	del_timer_sync(&hw->suspend_timer);
+	timer_delete_sync(&hw->end_timer);
+	timer_delete_sync(&hw->suspend_timer);
 	spin_lock_irq(&priv->lock);
 
 	hw->stopping = false;
@@ -621,7 +617,7 @@ unlock:
 }
 
 /**
- * img_ir_decoder_compatable() - Find whether a decoder will work with a device.
+ * img_ir_decoder_compatible() - Find whether a decoder will work with a device.
  * @priv:	IR private data.
  * @dec:	Decoder to check.
  *
@@ -867,9 +863,9 @@ static void img_ir_handle_data(struct img_ir_priv *priv, u32 len, u64 raw)
 }
 
 /* timer function to end waiting for repeat. */
-static void img_ir_end_timer(unsigned long arg)
+static void img_ir_end_timer(struct timer_list *t)
 {
-	struct img_ir_priv *priv = (struct img_ir_priv *)arg;
+	struct img_ir_priv *priv = timer_container_of(priv, t, hw.end_timer);
 
 	spin_lock_irq(&priv->lock);
 	img_ir_end_repeat(priv);
@@ -881,9 +877,10 @@ static void img_ir_end_timer(unsigned long arg)
  * cleared when invalid interrupts were generated due to a quirk in the
  * img-ir decoder.
  */
-static void img_ir_suspend_timer(unsigned long arg)
+static void img_ir_suspend_timer(struct timer_list *t)
 {
-	struct img_ir_priv *priv = (struct img_ir_priv *)arg;
+	struct img_ir_priv *priv = timer_container_of(priv, t,
+						      hw.suspend_timer);
 
 	spin_lock_irq(&priv->lock);
 	/*
@@ -1055,9 +1052,8 @@ int img_ir_probe_hw(struct img_ir_priv *priv)
 	img_ir_probe_hw_caps(priv);
 
 	/* Set up the end timer */
-	setup_timer(&hw->end_timer, img_ir_end_timer, (unsigned long)priv);
-	setup_timer(&hw->suspend_timer, img_ir_suspend_timer,
-				(unsigned long)priv);
+	timer_setup(&hw->end_timer, img_ir_end_timer, 0);
+	timer_setup(&hw->suspend_timer, img_ir_suspend_timer, 0);
 
 	/* Register a clock notifier */
 	if (!IS_ERR(priv->clk)) {

@@ -1,15 +1,36 @@
-#include "sched.h"
+// SPDX-License-Identifier: GPL-2.0
 
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/kallsyms.h>
-#include <linux/utsname.h>
-#include <linux/security.h>
-#include <linux/export.h>
+/*
+ * Auto-group scheduling implementation:
+ */
+
+#include "autogroup.h"
+#include "sched.h"
 
 unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
 static struct autogroup autogroup_default;
 static atomic_t autogroup_seq_nr;
+
+#ifdef CONFIG_SYSCTL
+static const struct ctl_table sched_autogroup_sysctls[] = {
+	{
+		.procname       = "sched_autogroup_enabled",
+		.data           = &sysctl_sched_autogroup_enabled,
+		.maxlen         = sizeof(unsigned int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1         = SYSCTL_ZERO,
+		.extra2         = SYSCTL_ONE,
+	},
+};
+
+static void __init sched_autogroup_sysctl_init(void)
+{
+	register_sysctl_init("kernel", sched_autogroup_sysctls);
+}
+#else /* !CONFIG_SYSCTL: */
+#define sched_autogroup_sysctl_init() do { } while (0)
+#endif /* !CONFIG_SYSCTL */
 
 void __init autogroup_init(struct task_struct *init_task)
 {
@@ -17,6 +38,7 @@ void __init autogroup_init(struct task_struct *init_task)
 	kref_init(&autogroup_default.kref);
 	init_rwsem(&autogroup_default.lock);
 	init_task->signal->autogroup = &autogroup_default;
+	sched_autogroup_sysctl_init();
 }
 
 void autogroup_free(struct task_group *tg)
@@ -33,7 +55,7 @@ static inline void autogroup_destroy(struct kref *kref)
 	ag->tg->rt_se = NULL;
 	ag->tg->rt_rq = NULL;
 #endif
-	sched_offline_group(ag->tg);
+	sched_release_group(ag->tg);
 	sched_destroy_group(ag->tg);
 }
 
@@ -89,7 +111,7 @@ static inline struct autogroup *autogroup_create(void)
 	free_rt_sched_group(tg);
 	tg->rt_se = root_task_group.rt_se;
 	tg->rt_rq = root_task_group.rt_rq;
-#endif
+#endif /* CONFIG_RT_GROUP_SCHED */
 	tg->autogroup = ag;
 
 	sched_online_group(tg, &root_task_group);
@@ -131,7 +153,7 @@ void sched_autogroup_exit_task(struct task_struct *p)
 	 * see this thread after that: we can no longer use signal->autogroup.
 	 * See the PF_EXITING check in task_wants_autogroup().
 	 */
-	sched_move_task(p);
+	sched_move_task(p, true);
 }
 
 static void
@@ -141,7 +163,8 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 	struct task_struct *t;
 	unsigned long flags;
 
-	BUG_ON(!lock_task_sighand(p, &flags));
+	if (WARN_ON_ONCE(!lock_task_sighand(p, &flags)))
+		return;
 
 	prev = p->signal->autogroup;
 	if (prev == ag) {
@@ -162,24 +185,25 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 	 * sched_autogroup_exit_task().
 	 */
 	for_each_thread(p, t)
-		sched_move_task(t);
+		sched_move_task(t, true);
 
 	unlock_task_sighand(p, &flags);
 	autogroup_kref_put(prev);
 }
 
-/* Allocates GFP_KERNEL, cannot be called under any spinlock */
+/* Allocates GFP_KERNEL, cannot be called under any spinlock: */
 void sched_autogroup_create_attach(struct task_struct *p)
 {
 	struct autogroup *ag = autogroup_create();
 
 	autogroup_move_group(p, ag);
-	/* drop extra reference added by autogroup_create() */
+
+	/* Drop extra reference added by autogroup_create(): */
 	autogroup_kref_put(ag);
 }
 EXPORT_SYMBOL(sched_autogroup_create_attach);
 
-/* Cannot be called under siglock.  Currently has no users */
+/* Cannot be called under siglock. Currently has no users: */
 void sched_autogroup_detach(struct task_struct *p)
 {
 	autogroup_move_group(p, &autogroup_default);
@@ -202,7 +226,6 @@ static int __init setup_autogroup(char *str)
 
 	return 1;
 }
-
 __setup("noautogroup", setup_autogroup);
 
 #ifdef CONFIG_PROC_FS
@@ -212,7 +235,7 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 	static unsigned long next = INITIAL_JIFFIES;
 	struct autogroup *ag;
 	unsigned long shares;
-	int err;
+	int err, idx;
 
 	if (nice < MIN_NICE || nice > MAX_NICE)
 		return -EINVAL;
@@ -224,13 +247,15 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 	if (nice < 0 && !can_nice(current, nice))
 		return -EPERM;
 
-	/* this is a heavy operation taking global locks.. */
+	/* This is a heavy operation, taking global locks.. */
 	if (!capable(CAP_SYS_ADMIN) && time_before(jiffies, next))
 		return -EAGAIN;
 
 	next = HZ / 10 + jiffies;
 	ag = autogroup_task_get(p);
-	shares = scale_load(sched_prio_to_weight[nice + 20]);
+
+	idx = array_index_nospec(nice + 20, 40);
+	shares = scale_load(sched_prio_to_weight[idx]);
 
 	down_write(&ag->lock);
 	err = sched_group_set_shares(ag->tg, shares);
@@ -259,7 +284,6 @@ out:
 }
 #endif /* CONFIG_PROC_FS */
 
-#ifdef CONFIG_SCHED_DEBUG
 int autogroup_path(struct task_group *tg, char *buf, int buflen)
 {
 	if (!task_group_is_autogroup(tg))
@@ -267,4 +291,3 @@ int autogroup_path(struct task_group *tg, char *buf, int buflen)
 
 	return snprintf(buf, buflen, "%s-%ld", "/autogroup", tg->autogroup->id);
 }
-#endif /* CONFIG_SCHED_DEBUG */

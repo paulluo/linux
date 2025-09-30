@@ -43,7 +43,7 @@ Required properties:
 			    Cell #6 : bit position of the reset in the
 			              reset status register
 			    Cell #7 : Flags used to control reset behavior,
-			              availible flags defined in the DT include
+			              available flags defined in the DT include
 			              file <dt-bindings/reset/ti-syscon.h>
 
 SysCon Reset Consumer Nodes
@@ -67,7 +67,7 @@ using the syscon node, and a consumer (a DSP device) on the TI Keystone 2
 
 / {
 	soc {
-		psc: power-sleep-controller@02350000 {
+		psc: power-sleep-controller@2350000 {
 			compatible = "syscon", "simple-mfd";
 			reg = <0x02350000 0x1000>;
 

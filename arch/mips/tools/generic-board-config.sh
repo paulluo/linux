@@ -1,12 +1,8 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Copyright (C) 2017 Imagination Technologies
-# Author: Paul Burton <paul.burton@imgtec.com>
-#
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation;  either version 2 of the  License, or (at your
-# option) any later version.
+# Author: Paul Burton <paul.burton@mips.com>
 #
 # This script merges configuration fragments for boards supported by the
 # generic MIPS kernel. It checks each for requirements specified using
@@ -30,8 +26,6 @@ cfg="$4"
 boards_origin="$5"
 shift 5
 
-cd "${srctree}"
-
 # Only print Skipping... lines if the user explicitly specified BOARDS=. In the
 # general case it only serves to obscure the useful output about what actually
 # was included.
@@ -48,7 +42,7 @@ environment*)
 esac
 
 for board in $@; do
-	board_cfg="arch/mips/configs/generic/board-${board}.config"
+	board_cfg="${srctree}/arch/mips/configs/generic/board-${board}.config"
 	if [ ! -f "${board_cfg}" ]; then
 		echo "WARNING: Board config '${board_cfg}' not found"
 		continue
@@ -84,7 +78,7 @@ for board in $@; do
 	done || continue
 
 	# Merge this board config fragment into our final config file
-	./scripts/kconfig/merge_config.sh \
+	${srctree}/scripts/kconfig/merge_config.sh \
 		-m -O ${objtree} ${cfg} ${board_cfg} \
 		| grep -Ev '^(#|Using)'
 done

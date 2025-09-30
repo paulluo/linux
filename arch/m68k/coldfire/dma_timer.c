@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * dma_timer.c -- Freescale ColdFire DMA Timer.
  *
@@ -47,7 +48,7 @@ static struct clocksource clocksource_cf_dt = {
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
-static int __init  init_cf_dt_clocksource(void)
+static int __init init_cf_dt_clocksource(void)
 {
 	/*
 	 * We setup DMA timer 0 in free run mode. This incrementing counter is

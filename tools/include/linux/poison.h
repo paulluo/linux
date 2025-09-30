@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_POISON_H
 #define _LINUX_POISON_H
 
@@ -14,6 +15,10 @@
 # define POISON_POINTER_DELTA 0
 #endif
 
+#ifdef __cplusplus
+#define LIST_POISON1  NULL
+#define LIST_POISON2  NULL
+#else
 /*
  * These are non-NULL pointers that will result in page faults
  * under normal circumstances, used to verify that nobody uses
@@ -21,6 +26,7 @@
  */
 #define LIST_POISON1  ((void *) 0x100 + POISON_POINTER_DELTA)
 #define LIST_POISON2  ((void *) 0x200 + POISON_POINTER_DELTA)
+#endif
 
 /********** include/linux/timer.h **********/
 /*
@@ -29,12 +35,8 @@
  */
 #define TIMER_ENTRY_STATIC	((void *) 0x300 + POISON_POINTER_DELTA)
 
-/********** mm/debug-pagealloc.c **********/
-#ifdef CONFIG_PAGE_POISONING_ZERO
-#define PAGE_POISON 0x00
-#else
+/********** mm/page_poison.c **********/
 #define PAGE_POISON 0xaa
-#endif
 
 /********** mm/page_alloc.c ************/
 
@@ -45,11 +47,8 @@
  * Magic nums for obj red zoning.
  * Placed in the first word before and the first word after an obj.
  */
-#define	RED_INACTIVE	0x09F911029D74E35BULL	/* when obj is inactive */
-#define	RED_ACTIVE	0xD84156C5635688C0ULL	/* when obj is active */
-
-#define SLUB_RED_INACTIVE	0xbb
-#define SLUB_RED_ACTIVE		0xcc
+#define SLUB_RED_INACTIVE	0xbb	/* when obj is inactive */
+#define SLUB_RED_ACTIVE		0xcc	/* when obj is active */
 
 /* ...and for poisoning */
 #define	POISON_INUSE	0x5a	/* for use-uninitialised poisoning */
@@ -80,9 +79,6 @@
 /********** kernel/mutexes **********/
 #define MUTEX_DEBUG_INIT	0x11
 #define MUTEX_DEBUG_FREE	0x22
-
-/********** lib/flex_array.c **********/
-#define FLEX_ARRAY_FREE	0x6c	/* for use-after-free poisoning */
 
 /********** security/ **********/
 #define KEY_DESTROY		0xbd

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * caam - Freescale FSL CAAM support for Public Key Cryptography descriptors
  *
@@ -12,7 +13,7 @@
 /* Descriptor for RSA Public operation */
 void init_rsa_pub_desc(u32 *desc, struct rsa_pub_pdb *pdb)
 {
-	init_job_desc_pdb(desc, 0, sizeof(*pdb));
+	init_job_desc_pdb(desc, 0, SIZEOF_RSA_PUB_PDB);
 	append_cmd(desc, pdb->sgf);
 	append_ptr(desc, pdb->f_dma);
 	append_ptr(desc, pdb->g_dma);
@@ -25,7 +26,7 @@ void init_rsa_pub_desc(u32 *desc, struct rsa_pub_pdb *pdb)
 /* Descriptor for RSA Private operation - Private Key Form #1 */
 void init_rsa_priv_f1_desc(u32 *desc, struct rsa_priv_f1_pdb *pdb)
 {
-	init_job_desc_pdb(desc, 0, sizeof(*pdb));
+	init_job_desc_pdb(desc, 0, SIZEOF_RSA_PRIV_F1_PDB);
 	append_cmd(desc, pdb->sgf);
 	append_ptr(desc, pdb->g_dma);
 	append_ptr(desc, pdb->f_dma);
@@ -38,7 +39,7 @@ void init_rsa_priv_f1_desc(u32 *desc, struct rsa_priv_f1_pdb *pdb)
 /* Descriptor for RSA Private operation - Private Key Form #2 */
 void init_rsa_priv_f2_desc(u32 *desc, struct rsa_priv_f2_pdb *pdb)
 {
-	init_job_desc_pdb(desc, 0, sizeof(*pdb));
+	init_job_desc_pdb(desc, 0, SIZEOF_RSA_PRIV_F2_PDB);
 	append_cmd(desc, pdb->sgf);
 	append_ptr(desc, pdb->g_dma);
 	append_ptr(desc, pdb->f_dma);
@@ -55,7 +56,7 @@ void init_rsa_priv_f2_desc(u32 *desc, struct rsa_priv_f2_pdb *pdb)
 /* Descriptor for RSA Private operation - Private Key Form #3 */
 void init_rsa_priv_f3_desc(u32 *desc, struct rsa_priv_f3_pdb *pdb)
 {
-	init_job_desc_pdb(desc, 0, sizeof(*pdb));
+	init_job_desc_pdb(desc, 0, SIZEOF_RSA_PRIV_F3_PDB);
 	append_cmd(desc, pdb->sgf);
 	append_ptr(desc, pdb->g_dma);
 	append_ptr(desc, pdb->f_dma);

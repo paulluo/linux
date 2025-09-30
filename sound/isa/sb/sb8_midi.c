@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Routines for control of SoundBlaster cards - MIDI interface
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  * --
  *
@@ -27,6 +14,7 @@
  */
 
 #include <linux/io.h>
+#include <linux/string.h>
 #include <linux/time.h>
 #include <sound/core.h>
 #include <sound/sb.h>
@@ -138,6 +126,7 @@ static int snd_sb8dsp_midi_output_close(struct snd_rawmidi_substream *substream)
 	struct snd_sb *chip;
 
 	chip = substream->rmidi->private_data;
+	timer_delete_sync(&chip->midi_timer);
 	spin_lock_irqsave(&chip->open_lock, flags);
 	chip->open &= ~(SB_OPEN_MIDI_OUTPUT | SB_OPEN_MIDI_OUTPUT_TRIGGER);
 	chip->midi_substream_output = NULL;
@@ -186,7 +175,7 @@ static void snd_sb8dsp_midi_output_write(struct snd_rawmidi_substream *substream
 		spin_lock_irqsave(&chip->open_lock, flags);
 		if (snd_rawmidi_transmit_peek(substream, &byte, 1) != 1) {
 			chip->open &= ~SB_OPEN_MIDI_OUTPUT_TRIGGER;
-			del_timer(&chip->midi_timer);
+			timer_delete(&chip->midi_timer);
 			spin_unlock_irqrestore(&chip->open_lock, flags);
 			break;
 		}
@@ -209,10 +198,10 @@ static void snd_sb8dsp_midi_output_write(struct snd_rawmidi_substream *substream
 	}
 }
 
-static void snd_sb8dsp_midi_output_timer(unsigned long data)
+static void snd_sb8dsp_midi_output_timer(struct timer_list *t)
 {
-	struct snd_rawmidi_substream *substream = (struct snd_rawmidi_substream *) data;
-	struct snd_sb * chip = substream->rmidi->private_data;
+	struct snd_sb *chip = timer_container_of(chip, t, midi_timer);
+	struct snd_rawmidi_substream *substream = chip->midi_substream_output;
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->open_lock, flags);
@@ -230,9 +219,6 @@ static void snd_sb8dsp_midi_output_trigger(struct snd_rawmidi_substream *substre
 	spin_lock_irqsave(&chip->open_lock, flags);
 	if (up) {
 		if (!(chip->open & SB_OPEN_MIDI_OUTPUT_TRIGGER)) {
-			setup_timer(&chip->midi_timer,
-				    snd_sb8dsp_midi_output_timer,
-				    (unsigned long) substream);
 			mod_timer(&chip->midi_timer, 1 + jiffies);
 			chip->open |= SB_OPEN_MIDI_OUTPUT_TRIGGER;
 		}
@@ -266,15 +252,17 @@ int snd_sb8dsp_midi(struct snd_sb *chip, int device)
 	struct snd_rawmidi *rmidi;
 	int err;
 
-	if ((err = snd_rawmidi_new(chip->card, "SB8 MIDI", device, 1, 1, &rmidi)) < 0)
+	err = snd_rawmidi_new(chip->card, "SB8 MIDI", device, 1, 1, &rmidi);
+	if (err < 0)
 		return err;
-	strcpy(rmidi->name, "SB8 MIDI");
+	strscpy(rmidi->name, "SB8 MIDI");
 	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT, &snd_sb8dsp_midi_output);
 	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &snd_sb8dsp_midi_input);
 	rmidi->info_flags |= SNDRV_RAWMIDI_INFO_OUTPUT | SNDRV_RAWMIDI_INFO_INPUT;
 	if (chip->hardware >= SB_HW_20)
 		rmidi->info_flags |= SNDRV_RAWMIDI_INFO_DUPLEX;
 	rmidi->private_data = chip;
+	timer_setup(&chip->midi_timer, snd_sb8dsp_midi_output_timer, 0);
 	chip->rmidi = rmidi;
 	return 0;
 }

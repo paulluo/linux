@@ -1,9 +1,6 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * Copyright (C) 2008, Creative Technology Ltd. All Rights Reserved.
- *
- * This source file is released under GPL v2 license (no other versions).
- * See the COPYING file included in the main directory of this source
- * distribution for the license terms and conditions.
  *
  * @File	ctdaio.c
  *
@@ -13,7 +10,6 @@
  *
  * @Author	Liu Chun
  * @Date 	May 23 2008
- *
  */
 
 #include "ctdaio.h"
@@ -33,7 +29,7 @@ struct daio_rsc_idx {
 	unsigned short right;
 };
 
-static struct daio_rsc_idx idx_20k1[NUM_DAIOTYP] = {
+static const struct daio_rsc_idx idx_20k1[NUM_DAIOTYP] = {
 	[LINEO1] = {.left = 0x00, .right = 0x01},
 	[LINEO2] = {.left = 0x18, .right = 0x19},
 	[LINEO3] = {.left = 0x08, .right = 0x09},
@@ -44,7 +40,7 @@ static struct daio_rsc_idx idx_20k1[NUM_DAIOTYP] = {
 	[SPDIFI1] = {.left = 0x95, .right = 0x9d},
 };
 
-static struct daio_rsc_idx idx_20k2[NUM_DAIOTYP] = {
+static const struct daio_rsc_idx idx_20k2[NUM_DAIOTYP] = {
 	[LINEO1] = {.left = 0x40, .right = 0x41},
 	[LINEO2] = {.left = 0x60, .right = 0x61},
 	[LINEO3] = {.left = 0x50, .right = 0x51},
@@ -55,12 +51,12 @@ static struct daio_rsc_idx idx_20k2[NUM_DAIOTYP] = {
 	[SPDIFIO] = {.left = 0x05, .right = 0x85},
 };
 
-static int daio_master(struct rsc *rsc)
+static void daio_master(struct rsc *rsc)
 {
 	/* Actually, this is not the resource index of DAIO.
 	 * For DAO, it is the input mapper index. And, for DAI,
 	 * it is the output time-slot index. */
-	return rsc->conj = rsc->idx;
+	rsc->conj = rsc->idx;
 }
 
 static int daio_index(const struct rsc *rsc)
@@ -68,19 +64,19 @@ static int daio_index(const struct rsc *rsc)
 	return rsc->conj;
 }
 
-static int daio_out_next_conj(struct rsc *rsc)
+static void daio_out_next_conj(struct rsc *rsc)
 {
-	return rsc->conj += 2;
+	rsc->conj += 2;
 }
 
-static int daio_in_next_conj_20k1(struct rsc *rsc)
+static void daio_in_next_conj_20k1(struct rsc *rsc)
 {
-	return rsc->conj += 0x200;
+	rsc->conj += 0x200;
 }
 
-static int daio_in_next_conj_20k2(struct rsc *rsc)
+static void daio_in_next_conj_20k2(struct rsc *rsc)
 {
-	return rsc->conj += 0x100;
+	rsc->conj += 0x100;
 }
 
 static const struct rsc_ops daio_out_rsc_ops = {
@@ -163,7 +159,7 @@ static int dao_set_left_input(struct dao *dao, struct rsc *input)
 	struct daio *daio = &dao->daio;
 	int i;
 
-	entry = kzalloc((sizeof(*entry) * daio->rscl.msr), GFP_KERNEL);
+	entry = kcalloc(daio->rscl.msr, sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
 
@@ -192,7 +188,7 @@ static int dao_set_right_input(struct dao *dao, struct rsc *input)
 	struct daio *daio = &dao->daio;
 	int i;
 
-	entry = kzalloc((sizeof(*entry) * daio->rscr.msr), GFP_KERNEL);
+	entry = kcalloc(daio->rscr.msr, sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
 
@@ -215,52 +211,30 @@ static int dao_set_right_input(struct dao *dao, struct rsc *input)
 	return 0;
 }
 
-static int dao_clear_left_input(struct dao *dao)
+static int dao_clear_input(struct dao *dao, unsigned int start, unsigned int end)
 {
-	struct imapper *entry;
-	struct daio *daio = &dao->daio;
-	int i;
+	unsigned int i;
 
-	if (!dao->imappers[0])
+	if (!dao->imappers[start])
 		return 0;
-
-	entry = dao->imappers[0];
-	dao->mgr->imap_delete(dao->mgr, entry);
-	/* Program conjugate resources */
-	for (i = 1; i < daio->rscl.msr; i++) {
-		entry = dao->imappers[i];
-		dao->mgr->imap_delete(dao->mgr, entry);
+	for (i = start; i < end; i++) {
+		dao->mgr->imap_delete(dao->mgr, dao->imappers[i]);
 		dao->imappers[i] = NULL;
 	}
-
-	kfree(dao->imappers[0]);
-	dao->imappers[0] = NULL;
 
 	return 0;
 }
 
+
+static int dao_clear_left_input(struct dao *dao)
+{
+	return dao_clear_input(dao, 0, dao->daio.rscl.msr);
+}
+
 static int dao_clear_right_input(struct dao *dao)
 {
-	struct imapper *entry;
-	struct daio *daio = &dao->daio;
-	int i;
-
-	if (!dao->imappers[daio->rscl.msr])
-		return 0;
-
-	entry = dao->imappers[daio->rscl.msr];
-	dao->mgr->imap_delete(dao->mgr, entry);
-	/* Program conjugate resources */
-	for (i = 1; i < daio->rscr.msr; i++) {
-		entry = dao->imappers[daio->rscl.msr + i];
-		dao->mgr->imap_delete(dao->mgr, entry);
-		dao->imappers[daio->rscl.msr + i] = NULL;
-	}
-
-	kfree(dao->imappers[daio->rscl.msr]);
-	dao->imappers[daio->rscl.msr] = NULL;
-
-	return 0;
+	return dao_clear_input(dao, dao->daio.rscl.msr,
+			dao->daio.rscl.msr + dao->daio.rscr.msr);
 }
 
 static const struct dao_rsc_ops dao_ops = {
@@ -398,7 +372,8 @@ static int dao_rsc_init(struct dao *dao,
 	if (err)
 		return err;
 
-	dao->imappers = kzalloc(sizeof(void *)*desc->msr*2, GFP_KERNEL);
+	dao->imappers = kzalloc(array3_size(sizeof(void *), desc->msr, 2),
+				GFP_KERNEL);
 	if (!dao->imappers) {
 		err = -ENOMEM;
 		goto error1;
@@ -687,7 +662,7 @@ static int daio_mgr_commit_write(struct daio_mgr *mgr)
 	return 0;
 }
 
-int daio_mgr_create(struct hw *hw, struct daio_mgr **rdaio_mgr)
+int daio_mgr_create(struct hw *hw, void **rdaio_mgr)
 {
 	int err, i;
 	struct daio_mgr *daio_mgr;
@@ -741,8 +716,9 @@ error1:
 	return err;
 }
 
-int daio_mgr_destroy(struct daio_mgr *daio_mgr)
+int daio_mgr_destroy(void *ptr)
 {
+	struct daio_mgr *daio_mgr = ptr;
 	unsigned long flags;
 
 	/* free daio input mapper list */

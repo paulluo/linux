@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* sstate.c: System soft state support.
  *
  * Copyright (C) 2007, 2008 David S. Miller <davem@davemloft.net>
@@ -5,6 +6,7 @@
 
 #include <linux/kernel.h>
 #include <linux/notifier.h>
+#include <linux/panic_notifier.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
 

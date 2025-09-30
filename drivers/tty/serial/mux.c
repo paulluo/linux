@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
 ** mux.c:
 **	serial driver for the Mux console found in some PA-RISC servers.
 **
 **	(c) Copyright 2002 Ryan Bradetich
 **	(c) Copyright 2002 Hewlett-Packard Company
-**
-** This program is free software; you can redistribute it and/or modify
-** it under the terms of the GNU General Public License as published by
-** the Free Software Foundation; either version 2 of the License, or
-** (at your option) any later version.
 **
 ** This Driver currently only supports the console (port 0) on the MUX.
 ** Additional work will be needed on this driver to enable the full
@@ -25,15 +21,11 @@
 #include <linux/console.h>
 #include <linux/delay.h> /* for udelay */
 #include <linux/device.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <asm/parisc-device.h>
 
-#if defined(CONFIG_SERIAL_MUX_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #include <linux/sysrq.h>
-#define SUPPORT_SYSRQ
-#endif
-
 #include <linux/serial_core.h>
 
 #define MUX_OFFSET 0x800
@@ -179,6 +171,13 @@ static void mux_break_ctl(struct uart_port *port, int break_state)
 {
 }
 
+static void mux_tx_done(struct uart_port *port)
+{
+	/* FIXME js: really needs to wait? */
+	while (UART_GET_FIFO_CNT(port))
+		udelay(1);
+}
+
 /**
  * mux_write - Write chars to the mux fifo.
  * @port: Ptr to the uart_port.
@@ -188,39 +187,13 @@ static void mux_break_ctl(struct uart_port *port, int break_state)
  */
 static void mux_write(struct uart_port *port)
 {
-	int count;
-	struct circ_buf *xmit = &port->state->xmit;
+	u8 ch;
 
-	if(port->x_char) {
-		UART_PUT_CHAR(port, port->x_char);
-		port->icount.tx++;
-		port->x_char = 0;
-		return;
-	}
-
-	if(uart_circ_empty(xmit) || uart_tx_stopped(port)) {
-		mux_stop_tx(port);
-		return;
-	}
-
-	count = (port->fifosize) - UART_GET_FIFO_CNT(port);
-	do {
-		UART_PUT_CHAR(port, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
-		if(uart_circ_empty(xmit))
-			break;
-
-	} while(--count > 0);
-
-	while(UART_GET_FIFO_CNT(port)) 
-		udelay(1);
-
-	if(uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
-		uart_write_wakeup(port);
-
-	if (uart_circ_empty(xmit))
-		mux_stop_tx(port);
+	uart_port_tx_limited(port, ch,
+		port->fifosize - UART_GET_FIFO_CNT(port),
+		true,
+		UART_PUT_CHAR(port, ch),
+		mux_tx_done(port));
 }
 
 /**
@@ -297,7 +270,7 @@ static void mux_shutdown(struct uart_port *port)
  */
 static void
 mux_set_termios(struct uart_port *port, struct ktermios *termios,
-	        struct ktermios *old)
+	        const struct ktermios *old)
 {
 }
 
@@ -375,7 +348,7 @@ static int mux_verify_port(struct uart_port *port, struct serial_struct *ser)
  *
  * This function periodically polls the Serial MUX to check for new data.
  */
-static void mux_poll(unsigned long unused)
+static void mux_poll(struct timer_list *unused)
 {  
 	int i;
 
@@ -478,7 +451,7 @@ static int __init mux_probe(struct parisc_device *dev)
 		port->iobase	= 0;
 		port->mapbase	= dev->hpa.start + MUX_OFFSET +
 						(i * MUX_LINE_OFFSET);
-		port->membase	= ioremap_nocache(port->mapbase, MUX_LINE_OFFSET);
+		port->membase	= ioremap(port->mapbase, MUX_LINE_OFFSET);
 		port->iotype	= UPIO_MEM;
 		port->type	= PORT_MUX;
 		port->irq	= 0;
@@ -487,13 +460,8 @@ static int __init mux_probe(struct parisc_device *dev)
 		port->ops	= &mux_pops;
 		port->flags	= UPF_BOOT_AUTOCONF;
 		port->line	= port_cnt;
+		port->has_sysrq = IS_ENABLED(CONFIG_SERIAL_MUX_CONSOLE);
 
-		/* The port->timeout needs to match what is present in
-		 * uart_wait_until_sent in serial_core.c.  Otherwise
-		 * the time spent in msleep_interruptable will be very
-		 * long, causing the appearance of a console hang.
-		 */
-		port->timeout   = HZ / 50;
 		spin_lock_init(&port->lock);
 
 		status = uart_add_one_port(&mux_driver, port);
@@ -503,7 +471,7 @@ static int __init mux_probe(struct parisc_device *dev)
 	return 0;
 }
 
-static int __exit mux_remove(struct parisc_device *dev)
+static void __exit mux_remove(struct parisc_device *dev)
 {
 	int i, j;
 	int port_count = (long)dev_get_drvdata(&dev->dev);
@@ -525,7 +493,6 @@ static int __exit mux_remove(struct parisc_device *dev)
 	}
 
 	release_mem_region(dev->hpa.start + MUX_OFFSET, port_count * MUX_LINE_OFFSET);
-	return 0;
 }
 
 /* Hack.  This idea was taken from the 8250_gsc.c on how to properly order
@@ -576,8 +543,7 @@ static int __init mux_init(void)
 
 	if(port_cnt > 0) {
 		/* Start the Mux timer */
-		init_timer(&mux_timer);
-		mux_timer.function = mux_poll;
+		timer_setup(&mux_timer, mux_poll, 0);
 		mod_timer(&mux_timer, jiffies + MUX_POLL_DELAY);
 
 #ifdef CONFIG_SERIAL_MUX_CONSOLE
@@ -597,7 +563,7 @@ static void __exit mux_exit(void)
 {
 	/* Delete the Mux timer. */
 	if(port_cnt > 0) {
-		del_timer_sync(&mux_timer);
+		timer_delete_sync(&mux_timer);
 #ifdef CONFIG_SERIAL_MUX_CONSOLE
 		unregister_console(&mux_console);
 #endif

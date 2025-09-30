@@ -1,22 +1,11 @@
-/**
- * Cadence GEM PCI wrapper.
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * DOC: Cadence GEM PCI wrapper.
  *
- * Copyright (C) 2016 Cadence Design Systems - http://www.cadence.com
+ * Copyright (C) 2016 Cadence Design Systems - https://www.cadence.com
  *
  * Authors: Rafal Ozieblo <rafalo@cadence.com>
  *	    Bartosz Folta <bfolta@cadence.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2  of
- * the License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/clk.h>
@@ -24,15 +13,13 @@
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/platform_data/macb.h>
 #include <linux/platform_device.h>
 #include "macb.h"
 
 #define PCI_DRIVER_NAME "macb_pci"
 #define PLAT_DRIVER_NAME "macb"
 
-#define CDNS_VENDOR_ID 0x17cd
-#define CDNS_DEVICE_ID 0xe007
+#define PCI_DEVICE_ID_CDNS_MACB 0xe007
 
 #define GEM_PCLK_RATE 50000000
 #define GEM_HCLK_RATE 50000000
@@ -123,13 +110,13 @@ static void macb_remove(struct pci_dev *pdev)
 	struct platform_device *plat_dev = pci_get_drvdata(pdev);
 	struct macb_platform_data *plat_data = dev_get_platdata(&plat_dev->dev);
 
-	platform_device_unregister(plat_dev);
 	clk_unregister(plat_data->pclk);
 	clk_unregister(plat_data->hclk);
+	platform_device_unregister(plat_dev);
 }
 
 static const struct pci_device_id dev_id_table[] = {
-	{ PCI_DEVICE(CDNS_VENDOR_ID, CDNS_DEVICE_ID), },
+	{ PCI_VDEVICE(CDNS, PCI_DEVICE_ID_CDNS_MACB) },
 	{ 0, }
 };
 

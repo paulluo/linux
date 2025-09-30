@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PHY_FIXED_H
 #define __PHY_FIXED_H
+
+#include <linux/types.h>
 
 struct fixed_phy_status {
 	int link;
@@ -10,36 +13,31 @@ struct fixed_phy_status {
 };
 
 struct device_node;
+struct net_device;
 
 #if IS_ENABLED(CONFIG_FIXED_PHY)
-extern int fixed_phy_add(unsigned int irq, int phy_id,
-			 struct fixed_phy_status *status,
-			 int link_gpio);
-extern struct phy_device *fixed_phy_register(unsigned int irq,
-					     struct fixed_phy_status *status,
-					     int link_gpio,
-					     struct device_node *np);
+extern int fixed_phy_change_carrier(struct net_device *dev, bool new_carrier);
+int fixed_phy_add(int phy_id, const struct fixed_phy_status *status);
+struct phy_device *fixed_phy_register(const struct fixed_phy_status *status,
+				      struct device_node *np);
+
 extern void fixed_phy_unregister(struct phy_device *phydev);
 extern int fixed_phy_set_link_update(struct phy_device *phydev,
 			int (*link_update)(struct net_device *,
 					   struct fixed_phy_status *));
-extern int fixed_phy_update_state(struct phy_device *phydev,
-			   const struct fixed_phy_status *status,
-			   const struct fixed_phy_status *changed);
 #else
-static inline int fixed_phy_add(unsigned int irq, int phy_id,
-				struct fixed_phy_status *status,
-				int link_gpio)
+static inline int fixed_phy_add(int phy_id,
+				const struct fixed_phy_status *status)
 {
 	return -ENODEV;
 }
-static inline struct phy_device *fixed_phy_register(unsigned int irq,
-						struct fixed_phy_status *status,
-						int gpio_link,
-						struct device_node *np)
+static inline struct phy_device *
+fixed_phy_register(const struct fixed_phy_status *status,
+		   struct device_node *np)
 {
 	return ERR_PTR(-ENODEV);
 }
+
 static inline void fixed_phy_unregister(struct phy_device *phydev)
 {
 }
@@ -49,11 +47,9 @@ static inline int fixed_phy_set_link_update(struct phy_device *phydev,
 {
 	return -ENODEV;
 }
-static inline int fixed_phy_update_state(struct phy_device *phydev,
-			   const struct fixed_phy_status *status,
-			   const struct fixed_phy_status *changed)
+static inline int fixed_phy_change_carrier(struct net_device *dev, bool new_carrier)
 {
-	return -ENODEV;
+	return -EINVAL;
 }
 #endif /* CONFIG_FIXED_PHY */
 

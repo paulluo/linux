@@ -1,13 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2011 STRATO AG
  * written by Arne Jansen <sensille@gmx.net>
- * Distributed under the GNU GPL license version 2.
- *
  */
 
-#ifndef __ULIST__
-#define __ULIST__
+#ifndef BTRFS_ULIST_H
+#define BTRFS_ULIST_H
 
+#include <linux/types.h>
 #include <linux/list.h>
 #include <linux/rbtree.h>
 
@@ -41,12 +41,14 @@ struct ulist {
 
 	struct list_head nodes;
 	struct rb_root root;
+	struct ulist_node *prealloc;
 };
 
 void ulist_init(struct ulist *ulist);
 void ulist_release(struct ulist *ulist);
 void ulist_reinit(struct ulist *ulist);
 struct ulist *ulist_alloc(gfp_t gfp_mask);
+void ulist_prealloc(struct ulist *ulist, gfp_t mask);
 void ulist_free(struct ulist *ulist);
 int ulist_add(struct ulist *ulist, u64 val, u64 aux, gfp_t gfp_mask);
 int ulist_add_merge(struct ulist *ulist, u64 val, u64 aux,
@@ -67,7 +69,7 @@ static inline int ulist_add_merge_ptr(struct ulist *ulist, u64 val, void *aux,
 #endif
 }
 
-struct ulist_node *ulist_next(struct ulist *ulist,
+struct ulist_node *ulist_next(const struct ulist *ulist,
 			      struct ulist_iterator *uiter);
 
 #define ULIST_ITER_INIT(uiter) ((uiter)->cur_list = NULL)

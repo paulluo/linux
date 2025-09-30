@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/sched/task_stack.h>
@@ -44,7 +45,8 @@ static void unwind_dump(struct unwind_state *state)
 			state->stack_info.type, state->stack_info.next_sp,
 			state->stack_mask, state->graph_idx);
 
-	for (sp = state->orig_sp; sp; sp = PTR_ALIGN(stack_info.next_sp, sizeof(long))) {
+	for (sp = PTR_ALIGN(state->orig_sp, sizeof(long)); sp;
+	     sp = PTR_ALIGN(stack_info.next_sp, sizeof(long))) {
 		if (get_stack_info(sp, state->task, &stack_info, &visit_mask))
 			break;
 
@@ -68,26 +70,11 @@ static void unwind_dump(struct unwind_state *state)
 	}
 }
 
-static size_t regs_size(struct pt_regs *regs)
-{
-	/* x86_32 regs from kernel mode are two words shorter: */
-	if (IS_ENABLED(CONFIG_X86_32) && !user_mode(regs))
-		return sizeof(*regs) - 2*sizeof(long);
-
-	return sizeof(*regs);
-}
-
 static bool in_entry_code(unsigned long ip)
 {
 	char *addr = (char *)ip;
 
-	if (addr >= __entry_text_start && addr < __entry_text_end)
-		return true;
-
-	if (addr >= __irqentry_text_start && addr < __irqentry_text_end)
-		return true;
-
-	return false;
+	return addr >= __entry_text_start && addr < __entry_text_end;
 }
 
 static inline unsigned long *last_frame(struct unwind_state *state)
@@ -174,6 +161,7 @@ static bool is_last_task_frame(struct unwind_state *state)
  * This determines if the frame pointer actually contains an encoded pointer to
  * pt_regs on the stack.  See ENCODE_FRAME_POINTER.
  */
+#ifdef CONFIG_X86_64
 static struct pt_regs *decode_frame_pointer(unsigned long *bp)
 {
 	unsigned long regs = (unsigned long)bp;
@@ -183,7 +171,28 @@ static struct pt_regs *decode_frame_pointer(unsigned long *bp)
 
 	return (struct pt_regs *)(regs & ~0x1);
 }
+#else
+static struct pt_regs *decode_frame_pointer(unsigned long *bp)
+{
+	unsigned long regs = (unsigned long)bp;
 
+	if (regs & 0x80000000)
+		return NULL;
+
+	return (struct pt_regs *)(regs | 0x80000000);
+}
+#endif
+
+/*
+ * While walking the stack, KMSAN may stomp on stale locals from other
+ * functions that were marked as uninitialized upon function exit, and
+ * now hold the call frame information for the current function (e.g. the frame
+ * pointer). Because KMSAN does not specifically mark call frames as
+ * initialized, false positive reports are possible. To prevent such reports,
+ * we mark the functions scanning the stack (here and below) with
+ * __no_kmsan_checks.
+ */
+__no_kmsan_checks
 static bool update_stack_state(struct unwind_state *state,
 			       unsigned long *next_bp)
 {
@@ -194,7 +203,7 @@ static bool update_stack_state(struct unwind_state *state,
 	size_t len;
 
 	if (state->regs)
-		prev_frame_end = (void *)state->regs + regs_size(state->regs);
+		prev_frame_end = (void *)state->regs + sizeof(*state->regs);
 	else
 		prev_frame_end = (void *)state->bp + FRAME_HEADER_SIZE;
 
@@ -202,7 +211,7 @@ static bool update_stack_state(struct unwind_state *state,
 	regs = decode_frame_pointer(next_bp);
 	if (regs) {
 		frame = (unsigned long *)regs;
-		len = regs_size(regs);
+		len = sizeof(*regs);
 		state->got_irq = true;
 	} else {
 		frame = next_bp;
@@ -241,8 +250,7 @@ static bool update_stack_state(struct unwind_state *state,
 	else {
 		addr_p = unwind_get_return_address_ptr(state);
 		addr = READ_ONCE_TASK_STACK(state->task, *addr_p);
-		state->ip = ftrace_graph_ret_addr(state->task, &state->graph_idx,
-						  addr, addr_p);
+		state->ip = unwind_recover_ret_addr(state, addr, addr_p);
 	}
 
 	/* Save the original stack pointer for unwind_dump(): */
@@ -252,6 +260,7 @@ static bool update_stack_state(struct unwind_state *state,
 	return true;
 }
 
+__no_kmsan_checks
 bool unwind_next_frame(struct unwind_state *state)
 {
 	struct pt_regs *regs;
@@ -270,13 +279,13 @@ bool unwind_next_frame(struct unwind_state *state)
 		/*
 		 * kthreads (other than the boot CPU's idle thread) have some
 		 * partial regs at the end of their stack which were placed
-		 * there by copy_thread_tls().  But the regs don't have any
+		 * there by copy_thread().  But the regs don't have any
 		 * useful information, so we can skip them.
 		 *
 		 * This user_mode() check is slightly broader than a PF_KTHREAD
 		 * check because it also catches the awkward situation where a
 		 * newly forked kthread transitions into a user task by calling
-		 * do_execve(), which eventually clears PF_KTHREAD.
+		 * kernel_execve(), which eventually clears PF_KTHREAD.
 		 */
 		if (!user_mode(regs))
 			goto the_end;
@@ -293,10 +302,14 @@ bool unwind_next_frame(struct unwind_state *state)
 	}
 
 	/* Get the next frame pointer: */
-	if (state->regs)
+	if (state->next_bp) {
+		next_bp = state->next_bp;
+		state->next_bp = NULL;
+	} else if (state->regs) {
 		next_bp = (unsigned long *)state->regs->bp;
-	else
+	} else {
 		next_bp = (unsigned long *)READ_ONCE_TASK_STACK(state->task, *state->bp);
+	}
 
 	/* Move to the next frame if it's safe: */
 	if (!update_stack_state(state, next_bp))
@@ -326,6 +339,16 @@ bad_address:
 	if (state->regs &&
 	    state->regs->sp >= (unsigned long)last_aligned_frame(state) &&
 	    state->regs->sp < (unsigned long)task_pt_regs(state->task))
+		goto the_end;
+
+	/*
+	 * There are some known frame pointer issues on 32-bit.  Disable
+	 * unwinder warnings on 32-bit until it gets objtool support.
+	 */
+	if (IS_ENABLED(CONFIG_X86_32))
+		goto the_end;
+
+	if (state->task != current)
 		goto the_end;
 
 	if (state->regs) {
@@ -364,6 +387,20 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 
 	bp = get_frame_pointer(task, regs);
 
+	/*
+	 * If we crash with IP==0, the last successfully executed instruction
+	 * was probably an indirect function call with a NULL function pointer.
+	 * That means that SP points into the middle of an incomplete frame:
+	 * *SP is a return pointer, and *(SP-sizeof(unsigned long)) is where we
+	 * would have written a frame pointer if we hadn't crashed.
+	 * Pretend that the frame is complete and that BP points to it, but save
+	 * the real BP so that we can use it when looking for the next frame.
+	 */
+	if (regs && regs->ip == 0 && (unsigned long *)regs->sp >= first_frame) {
+		state->next_bp = bp;
+		bp = ((unsigned long *)regs->sp) - 1;
+	}
+
 	/* Initialize stack info and make sure the frame data is accessible: */
 	get_stack_info(bp, state->task, &state->stack_info,
 		       &state->stack_mask);
@@ -376,7 +413,7 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	 */
 	while (!unwind_done(state) &&
 	       (!on_stack(&state->stack_info, first_frame, sizeof(long)) ||
-			state->bp < first_frame))
+			(state->next_bp == NULL && state->bp < first_frame)))
 		unwind_next_frame(state);
 }
 EXPORT_SYMBOL_GPL(__unwind_start);

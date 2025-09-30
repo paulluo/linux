@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * arch/alpha/lib/copy_user.S
  *
@@ -11,7 +12,7 @@
  * exception setup stuff..
  */
 
-#include <asm/export.h>
+#include <linux/export.h>
 
 /* Allow an exception for an insn; exit if we get one.  */
 #define EXI(x,y...)			\

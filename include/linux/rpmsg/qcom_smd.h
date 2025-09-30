@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _LINUX_RPMSG_QCOM_SMD_H
 #define _LINUX_RPMSG_QCOM_SMD_H
@@ -10,7 +11,7 @@ struct qcom_smd_edge;
 
 struct qcom_smd_edge *qcom_smd_register_edge(struct device *parent,
 					     struct device_node *node);
-int qcom_smd_unregister_edge(struct qcom_smd_edge *edge);
+void qcom_smd_unregister_edge(struct qcom_smd_edge *edge);
 
 #else
 
@@ -21,9 +22,8 @@ qcom_smd_register_edge(struct device *parent,
 	return NULL;
 }
 
-static inline int qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
+static inline void qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
 {
-	return 0;
 }
 
 #endif

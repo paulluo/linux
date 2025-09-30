@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * MMIO register bitfield-controlled multiplexer driver
  *
  * Copyright (C) 2017 Pengutronix, Philipp Zabel <kernel@pengutronix.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/bitops.h>
@@ -13,7 +10,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mux/driver.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -31,9 +28,16 @@ static const struct mux_control_ops mux_mmio_ops = {
 
 static const struct of_device_id mux_mmio_dt_ids[] = {
 	{ .compatible = "mmio-mux", },
+	{ .compatible = "reg-mux", },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mux_mmio_dt_ids);
+
+static const struct regmap_config mux_mmio_regmap_cfg = {
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+};
 
 static int mux_mmio_probe(struct platform_device *pdev)
 {
@@ -42,16 +46,29 @@ static int mux_mmio_probe(struct platform_device *pdev)
 	struct regmap_field **fields;
 	struct mux_chip *mux_chip;
 	struct regmap *regmap;
+	void __iomem *base;
 	int num_fields;
 	int ret;
 	int i;
 
-	regmap = syscon_node_to_regmap(np->parent);
-	if (IS_ERR(regmap)) {
-		ret = PTR_ERR(regmap);
-		dev_err(dev, "failed to get regmap: %d\n", ret);
-		return ret;
+	if (of_device_is_compatible(np, "mmio-mux")) {
+		regmap = syscon_node_to_regmap(np->parent);
+	} else {
+		base = devm_platform_ioremap_resource(pdev, 0);
+		if (IS_ERR(base))
+			regmap = ERR_PTR(-ENODEV);
+		else
+			regmap = regmap_init_mmio(dev, base, &mux_mmio_regmap_cfg);
+		/* Fallback to checking the parent node on "real" errors. */
+		if (IS_ERR(regmap) && regmap != ERR_PTR(-EPROBE_DEFER)) {
+			regmap = dev_get_regmap(dev->parent, NULL);
+			if (!regmap)
+				regmap = ERR_PTR(-ENODEV);
+		}
 	}
+	if (IS_ERR(regmap))
+		return dev_err_probe(dev, PTR_ERR(regmap),
+				     "failed to get regmap\n");
 
 	ret = of_property_count_u32_elems(np, "mux-reg-masks");
 	if (ret == 0 || ret % 2)
@@ -101,7 +118,7 @@ static int mux_mmio_probe(struct platform_device *pdev)
 		fields[i] = devm_regmap_field_alloc(dev, regmap, field);
 		if (IS_ERR(fields[i])) {
 			ret = PTR_ERR(fields[i]);
-			dev_err(dev, "bitfield %d: failed allocate: %d\n",
+			dev_err(dev, "bitfield %d: failed to allocate: %d\n",
 				i, ret);
 			return ret;
 		}
@@ -130,7 +147,7 @@ static int mux_mmio_probe(struct platform_device *pdev)
 static struct platform_driver mux_mmio_driver = {
 	.driver = {
 		.name = "mmio-mux",
-		.of_match_table	= of_match_ptr(mux_mmio_dt_ids),
+		.of_match_table	= mux_mmio_dt_ids,
 	},
 	.probe = mux_mmio_probe,
 };

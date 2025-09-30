@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM intel_ish
 
@@ -17,7 +18,7 @@ TRACE_EVENT(ishtp_dump,
 	),
 
 	TP_fast_assign(
-		__assign_str(message, message);
+		__assign_str(message);
 	),
 
 	TP_printk("%s", __get_str(message))

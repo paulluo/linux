@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: sunqe.h,v 1.13 2000/02/09 11:15:42 davem Exp $
  * sunqe.h: Definitions for the Sun QuadEthernet driver.
  *
@@ -35,7 +36,7 @@
 #define GLOB_PSIZE_6144       0x10       /* 6k packet size           */
 #define GLOB_PSIZE_8192       0x11       /* 8k packet size           */
 
-/* In MACE mode, there are four qe channels.  Each channel has it's own
+/* In MACE mode, there are four qe channels.  Each channel has its own
  * status bits in the QEC status register.  This macro picks out the
  * ones you want.
  */

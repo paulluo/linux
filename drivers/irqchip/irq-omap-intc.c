@@ -25,10 +25,6 @@
 
 #include <linux/irqchip/irq-omap-intc.h>
 
-/* Define these here for now until we drop all board-files */
-#define OMAP24XX_IC_BASE	0x480fe000
-#define OMAP34XX_IC_BASE	0x48200000
-
 /* selected INTC register offsets */
 
 #define INTC_REVISION		0x0000
@@ -70,8 +66,8 @@ static struct omap_intc_regs intc_context;
 
 static struct irq_domain *domain;
 static void __iomem *omap_irq_base;
-static int omap_nr_pending = 3;
-static int omap_nr_irqs = 96;
+static int omap_nr_pending;
+static int omap_nr_irqs;
 
 static void intc_writel(u32 reg, u32 val)
 {
@@ -252,7 +248,7 @@ static int __init omap_init_irq_of(struct device_node *node)
 	if (WARN_ON(!omap_irq_base))
 		return -ENOMEM;
 
-	domain = irq_domain_add_linear(node, omap_nr_irqs,
+	domain = irq_domain_create_linear(of_fwnode_handle(node), omap_nr_irqs,
 			&irq_generic_chip_ops, NULL);
 
 	omap_irq_soft_reset();
@@ -278,7 +274,7 @@ static int __init omap_init_irq_legacy(u32 base, struct device_node *node)
 		irq_base = 0;
 	}
 
-	domain = irq_domain_add_legacy(node, omap_nr_irqs, irq_base, 0,
+	domain = irq_domain_create_legacy(of_fwnode_handle(node), omap_nr_irqs, irq_base, 0,
 			&irq_domain_simple_ops, NULL);
 
 	omap_irq_soft_reset();
@@ -329,8 +325,7 @@ static int __init omap_init_irq(u32 base, struct device_node *node)
 	return ret;
 }
 
-static asmlinkage void __exception_irq_entry
-omap_intc_handle_irq(struct pt_regs *regs)
+static void __exception_irq_entry omap_intc_handle_irq(struct pt_regs *regs)
 {
 	extern unsigned long irq_err_count;
 	u32 irqnr;
@@ -361,15 +356,7 @@ omap_intc_handle_irq(struct pt_regs *regs)
 	}
 
 	irqnr &= ACTIVEIRQ_MASK;
-	handle_domain_irq(domain, irqnr, regs);
-}
-
-void __init omap3_init_irq(void)
-{
-	omap_nr_irqs = 96;
-	omap_nr_pending = 3;
-	omap_init_irq(OMAP34XX_IC_BASE, NULL);
-	set_handle_irq(omap_intc_handle_irq);
+	generic_handle_domain_irq(domain, irqnr);
 }
 
 static int __init intc_of_init(struct device_node *node,

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_INCLUDE_PATH ../../drivers/dma-buf
 #define TRACE_SYSTEM sync_trace
@@ -19,7 +20,7 @@ TRACE_EVENT(sync_timeline,
 	),
 
 	TP_fast_assign(
-			__assign_str(name, timeline->name);
+			__assign_str(name);
 			__entry->value = timeline->value;
 	),
 

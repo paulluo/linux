@@ -1,24 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Qualcomm Technologies HIDMA DMA engine Management interface
  *
  * Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/dmaengine.h>
 #include <linux/acpi.h>
-#include <linux/of.h>
 #include <linux/property.h>
-#include <linux/of_irq.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
@@ -181,16 +171,14 @@ static int hidma_mgmt_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_get_sync(&pdev->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	virtaddr = devm_ioremap_resource(&pdev->dev, res);
+	virtaddr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(virtaddr)) {
-		rc = -ENOMEM;
+		rc = PTR_ERR(virtaddr);
 		goto out;
 	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
-		dev_err(&pdev->dev, "irq resources not found\n");
 		rc = irq;
 		goto out;
 	}
@@ -334,129 +322,14 @@ static const struct acpi_device_id hidma_mgmt_acpi_ids[] = {
 MODULE_DEVICE_TABLE(acpi, hidma_mgmt_acpi_ids);
 #endif
 
-static const struct of_device_id hidma_mgmt_match[] = {
-	{.compatible = "qcom,hidma-mgmt-1.0",},
-	{},
-};
-MODULE_DEVICE_TABLE(of, hidma_mgmt_match);
-
 static struct platform_driver hidma_mgmt_driver = {
 	.probe = hidma_mgmt_probe,
 	.driver = {
 		   .name = "hidma-mgmt",
-		   .of_match_table = hidma_mgmt_match,
 		   .acpi_match_table = ACPI_PTR(hidma_mgmt_acpi_ids),
 	},
 };
 
-#if defined(CONFIG_OF) && defined(CONFIG_OF_IRQ)
-static int object_counter;
-
-static int __init hidma_mgmt_of_populate_channels(struct device_node *np)
-{
-	struct platform_device *pdev_parent = of_find_device_by_node(np);
-	struct platform_device_info pdevinfo;
-	struct of_phandle_args out_irq;
-	struct device_node *child;
-	struct resource *res = NULL;
-	const __be32 *cell;
-	int ret = 0, size, i, num;
-	u64 addr, addr_size;
-
-	for_each_available_child_of_node(np, child) {
-		struct resource *res_iter;
-		struct platform_device *new_pdev;
-
-		cell = of_get_property(child, "reg", &size);
-		if (!cell) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		size /= sizeof(*cell);
-		num = size /
-			(of_n_addr_cells(child) + of_n_size_cells(child)) + 1;
-
-		/* allocate a resource array */
-		res = kcalloc(num, sizeof(*res), GFP_KERNEL);
-		if (!res) {
-			ret = -ENOMEM;
-			goto out;
-		}
-
-		/* read each reg value */
-		i = 0;
-		res_iter = res;
-		while (i < size) {
-			addr = of_read_number(&cell[i],
-					      of_n_addr_cells(child));
-			i += of_n_addr_cells(child);
-
-			addr_size = of_read_number(&cell[i],
-						   of_n_size_cells(child));
-			i += of_n_size_cells(child);
-
-			res_iter->start = addr;
-			res_iter->end = res_iter->start + addr_size - 1;
-			res_iter->flags = IORESOURCE_MEM;
-			res_iter++;
-		}
-
-		ret = of_irq_parse_one(child, 0, &out_irq);
-		if (ret)
-			goto out;
-
-		res_iter->start = irq_create_of_mapping(&out_irq);
-		res_iter->name = "hidma event irq";
-		res_iter->flags = IORESOURCE_IRQ;
-
-		memset(&pdevinfo, 0, sizeof(pdevinfo));
-		pdevinfo.fwnode = &child->fwnode;
-		pdevinfo.parent = pdev_parent ? &pdev_parent->dev : NULL;
-		pdevinfo.name = child->name;
-		pdevinfo.id = object_counter++;
-		pdevinfo.res = res;
-		pdevinfo.num_res = num;
-		pdevinfo.data = NULL;
-		pdevinfo.size_data = 0;
-		pdevinfo.dma_mask = DMA_BIT_MASK(64);
-		new_pdev = platform_device_register_full(&pdevinfo);
-		if (IS_ERR(new_pdev)) {
-			ret = PTR_ERR(new_pdev);
-			goto out;
-		}
-		of_node_get(child);
-		new_pdev->dev.of_node = child;
-		of_dma_configure(&new_pdev->dev, child);
-		/*
-		 * It is assumed that calling of_msi_configure is safe on
-		 * platforms with or without MSI support.
-		 */
-		of_msi_configure(&new_pdev->dev, child);
-		of_node_put(child);
-		kfree(res);
-		res = NULL;
-	}
-out:
-	kfree(res);
-
-	return ret;
-}
-#endif
-
-static int __init hidma_mgmt_init(void)
-{
-#if defined(CONFIG_OF) && defined(CONFIG_OF_IRQ)
-	struct device_node *child;
-
-	for_each_matching_node(child, hidma_mgmt_match) {
-		/* device tree based firmware here */
-		hidma_mgmt_of_populate_channels(child);
-	}
-#endif
-	platform_driver_register(&hidma_mgmt_driver);
-
-	return 0;
-}
-module_init(hidma_mgmt_init);
+module_platform_driver(hidma_mgmt_driver);
+MODULE_DESCRIPTION("Qualcomm Technologies HIDMA DMA engine interface");
 MODULE_LICENSE("GPL v2");

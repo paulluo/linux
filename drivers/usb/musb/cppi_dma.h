@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2005-2006 by Texas Instruments */
 
 #ifndef _CPPI_DMA_H_
@@ -119,9 +120,6 @@ struct cppi {
 
 	struct list_head		tx_complete;
 };
-
-/* CPPI IRQ handler */
-extern irqreturn_t cppi_interrupt(int, void *);
 
 struct cppi41_dma_channel {
 	struct dma_channel channel;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Battery and Power Management code for the Sharp SL-C7xx and SL-Cxx00
  * series of PDAs
@@ -5,11 +6,6 @@
  * Copyright (c) 2004-2005 Richard Purdie
  *
  * Based on code written by Sharp for 2.4 kernels
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #undef DEBUG
@@ -28,17 +24,17 @@
 
 #include <asm/mach-types.h>
 #include "pm.h"
-#include <mach/pxa2xx-regs.h>
+#include "pxa2xx-regs.h"
 #include "regs-rtc.h"
 #include "sharpsl_pm.h"
 
 /*
  * Constants
  */
-#define SHARPSL_CHARGE_ON_TIME_INTERVAL        (msecs_to_jiffies(1*60*1000))  /* 1 min */
-#define SHARPSL_CHARGE_FINISH_TIME             (msecs_to_jiffies(10*60*1000)) /* 10 min */
-#define SHARPSL_BATCHK_TIME                    (msecs_to_jiffies(15*1000))    /* 15 sec */
-#define SHARPSL_BATCHK_TIME_SUSPEND            (60*10)                        /* 10 min */
+#define SHARPSL_CHARGE_ON_TIME_INTERVAL        (secs_to_jiffies(60))
+#define SHARPSL_CHARGE_FINISH_TIME             (secs_to_jiffies(10*60))
+#define SHARPSL_BATCHK_TIME                    (secs_to_jiffies(15))
+#define SHARPSL_BATCHK_TIME_SUSPEND            (60*10) /* 10 min */
 
 #define SHARPSL_WAIT_CO_TIME                   15  /* 15 sec */
 #define SHARPSL_WAIT_DISCHARGE_ON              100 /* 100 msec */
@@ -174,10 +170,6 @@ extern int max1111_read_channel(int);
  */
 int sharpsl_pm_pxa_read_max1111(int channel)
 {
-	/* Ugly, better move this function into another module */
-	if (machine_is_tosa())
-	    return 0;
-
 	/* max1111 accepts channels from 0-3, however,
 	 * it is encoded from 0-7 here in the code.
 	 */
@@ -224,8 +216,6 @@ void sharpsl_battery_kick(void)
 {
 	schedule_delayed_work(&sharpsl_bat, msecs_to_jiffies(125));
 }
-EXPORT_SYMBOL(sharpsl_battery_kick);
-
 
 static void sharpsl_battery_thread(struct work_struct *private_)
 {
@@ -341,7 +331,7 @@ static void sharpsl_charge_toggle(struct work_struct *private_)
 	sharpsl_pm.charge_start_time = jiffies;
 }
 
-static void sharpsl_ac_timer(unsigned long data)
+static void sharpsl_ac_timer(struct timer_list *unused)
 {
 	int acin = sharpsl_pm.machinfo->read_devdata(SHARPSL_STATUS_ACIN);
 
@@ -366,7 +356,7 @@ static irqreturn_t sharpsl_ac_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void sharpsl_chrg_full_timer(unsigned long data)
+static void sharpsl_chrg_full_timer(struct timer_list *unused)
 {
 	dev_dbg(sharpsl_pm.dev, "Charge Full at time: %lx\n", jiffies);
 
@@ -802,8 +792,8 @@ static ssize_t battery_voltage_show(struct device *dev, struct device_attribute 
 	return sprintf(buf, "%d\n", sharpsl_pm.battstat.mainbat_voltage);
 }
 
-static DEVICE_ATTR(battery_percentage, 0444, battery_percentage_show, NULL);
-static DEVICE_ATTR(battery_voltage, 0444, battery_voltage_show, NULL);
+static DEVICE_ATTR_RO(battery_percentage);
+static DEVICE_ATTR_RO(battery_voltage);
 
 extern void (*apm_get_power_status)(struct apm_power_info *);
 
@@ -841,9 +831,9 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 	sharpsl_pm.charge_mode = CHRG_OFF;
 	sharpsl_pm.flags = 0;
 
-	setup_timer(&sharpsl_pm.ac_timer, sharpsl_ac_timer, 0UL);
+	timer_setup(&sharpsl_pm.ac_timer, sharpsl_ac_timer, 0);
 
-	setup_timer(&sharpsl_pm.chrg_full_timer, sharpsl_chrg_full_timer, 0UL);
+	timer_setup(&sharpsl_pm.chrg_full_timer, sharpsl_chrg_full_timer, 0);
 
 	led_trigger_register_simple("sharpsl-charge", &sharpsl_charge_led_trigger);
 
@@ -898,7 +888,7 @@ static int sharpsl_pm_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int sharpsl_pm_remove(struct platform_device *pdev)
+static void sharpsl_pm_remove(struct platform_device *pdev)
 {
 	suspend_set_ops(NULL);
 
@@ -923,10 +913,8 @@ static int sharpsl_pm_remove(struct platform_device *pdev)
 	if (sharpsl_pm.machinfo->exit)
 		sharpsl_pm.machinfo->exit();
 
-	del_timer_sync(&sharpsl_pm.chrg_full_timer);
-	del_timer_sync(&sharpsl_pm.ac_timer);
-
-	return 0;
+	timer_delete_sync(&sharpsl_pm.chrg_full_timer);
+	timer_delete_sync(&sharpsl_pm.ac_timer);
 }
 
 static struct platform_driver sharpsl_pm_driver = {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for TerraTec DMX 6Fire USB
  *
@@ -6,11 +7,6 @@
  * Author:	Torsten Schenk <torsten.schenk@zoho.com>
  * Created:	Jan 01, 2011
  * Copyright:	(C) Torsten Schenk
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <sound/rawmidi.h>
@@ -187,7 +183,7 @@ int usb6fire_midi_init(struct sfire_chip *chip)
 		return ret;
 	}
 	rt->instance->private_data = rt;
-	strcpy(rt->instance->name, "DMX6FireUSB MIDI");
+	strscpy(rt->instance->name, "DMX6FireUSB MIDI");
 	rt->instance->info_flags = SNDRV_RAWMIDI_INFO_OUTPUT |
 			SNDRV_RAWMIDI_INFO_INPUT |
 			SNDRV_RAWMIDI_INFO_DUPLEX;

@@ -35,7 +35,6 @@
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/rfcomm.h>
 
-#define RFCOMM_TTY_MAGIC 0x6d02		/* magic number for rfcomm struct */
 #define RFCOMM_TTY_PORTS RFCOMM_MAX_DEV	/* whole lotta rfcomm devices */
 #define RFCOMM_TTY_MAJOR 216		/* device node major id of the usb/bluetooth.c driver */
 #define RFCOMM_TTY_MINOR 0
@@ -120,7 +119,7 @@ static int rfcomm_dev_activate(struct tty_port *port, struct tty_struct *tty)
 }
 
 /* we block the open until the dlc->state becomes BT_CONNECTED */
-static int rfcomm_dev_carrier_raised(struct tty_port *port)
+static bool rfcomm_dev_carrier_raised(struct tty_port *port)
 {
 	struct rfcomm_dev *dev = container_of(port, struct rfcomm_dev, port);
 
@@ -198,20 +197,22 @@ static void rfcomm_reparent_device(struct rfcomm_dev *dev)
 	hci_dev_put(hdev);
 }
 
-static ssize_t show_address(struct device *tty_dev, struct device_attribute *attr, char *buf)
+static ssize_t address_show(struct device *tty_dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct rfcomm_dev *dev = dev_get_drvdata(tty_dev);
-	return sprintf(buf, "%pMR\n", &dev->dst);
+	return sysfs_emit(buf, "%pMR\n", &dev->dst);
 }
 
-static ssize_t show_channel(struct device *tty_dev, struct device_attribute *attr, char *buf)
+static ssize_t channel_show(struct device *tty_dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct rfcomm_dev *dev = dev_get_drvdata(tty_dev);
-	return sprintf(buf, "%d\n", dev->channel);
+	return sysfs_emit(buf, "%d\n", dev->channel);
 }
 
-static DEVICE_ATTR(address, S_IRUGO, show_address, NULL);
-static DEVICE_ATTR(channel, S_IRUGO, show_channel, NULL);
+static DEVICE_ATTR_RO(address);
+static DEVICE_ATTR_RO(channel);
 
 static struct rfcomm_dev *__rfcomm_dev_add(struct rfcomm_dev_req *req,
 					   struct rfcomm_dlc *dlc)
@@ -413,10 +414,8 @@ static int __rfcomm_create_dev(struct sock *sk, void __user *arg)
 		dlc = rfcomm_dlc_exists(&req.src, &req.dst, req.channel);
 		if (IS_ERR(dlc))
 			return PTR_ERR(dlc);
-		else if (dlc) {
-			rfcomm_dlc_put(dlc);
+		if (dlc)
 			return -EBUSY;
-		}
 		dlc = rfcomm_dlc_alloc(GFP_KERNEL);
 		if (!dlc)
 			return -ENOMEM;
@@ -439,7 +438,6 @@ static int __rfcomm_release_dev(void __user *arg)
 {
 	struct rfcomm_dev_req req;
 	struct rfcomm_dev *dev;
-	struct tty_struct *tty;
 
 	if (copy_from_user(&req, arg, sizeof(req)))
 		return -EFAULT;
@@ -465,11 +463,7 @@ static int __rfcomm_release_dev(void __user *arg)
 		rfcomm_dlc_close(dev->dlc, 0);
 
 	/* Shut down TTY synchronously before freeing rfcomm_dev */
-	tty = tty_port_tty_get(&dev->port);
-	if (tty) {
-		tty_vhangup(tty);
-		tty_kref_put(tty);
-	}
+	tty_port_tty_vhangup(&dev->port);
 
 	if (!test_bit(RFCOMM_TTY_OWNED, &dev->status))
 		tty_port_put(&dev->port);
@@ -505,7 +499,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 	struct rfcomm_dev *dev;
 	struct rfcomm_dev_list_req *dl;
 	struct rfcomm_dev_info *di;
-	int n = 0, size, err;
+	int n = 0, err;
 	u16 dev_num;
 
 	BT_DBG("");
@@ -516,12 +510,11 @@ static int rfcomm_get_dev_list(void __user *arg)
 	if (!dev_num || dev_num > (PAGE_SIZE * 4) / sizeof(*di))
 		return -EINVAL;
 
-	size = sizeof(*dl) + dev_num * sizeof(*di);
-
-	dl = kzalloc(size, GFP_KERNEL);
+	dl = kzalloc(struct_size(dl, dev_info, dev_num), GFP_KERNEL);
 	if (!dl)
 		return -ENOMEM;
 
+	dl->dev_num = dev_num;
 	di = dl->dev_info;
 
 	mutex_lock(&rfcomm_dev_lock);
@@ -529,12 +522,12 @@ static int rfcomm_get_dev_list(void __user *arg)
 	list_for_each_entry(dev, &rfcomm_dev_list, list) {
 		if (!tty_port_get(&dev->port))
 			continue;
-		(di + n)->id      = dev->id;
-		(di + n)->flags   = dev->flags;
-		(di + n)->state   = dev->dlc->state;
-		(di + n)->channel = dev->channel;
-		bacpy(&(di + n)->src, &dev->src);
-		bacpy(&(di + n)->dst, &dev->dst);
+		di[n].id      = dev->id;
+		di[n].flags   = dev->flags;
+		di[n].state   = dev->dlc->state;
+		di[n].channel = dev->channel;
+		bacpy(&di[n].src, &dev->src);
+		bacpy(&di[n].dst, &dev->dst);
 		tty_port_put(&dev->port);
 		if (++n >= dev_num)
 			break;
@@ -543,9 +536,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 	mutex_unlock(&rfcomm_dev_lock);
 
 	dl->dev_num = n;
-	size = sizeof(*dl) + n * sizeof(*di);
-
-	err = copy_to_user(arg, dl, size);
+	err = copy_to_user(arg, dl, struct_size(dl, dev_info, n));
 	kfree(dl);
 
 	return err ? -EFAULT : 0;
@@ -772,7 +763,7 @@ static int rfcomm_tty_open(struct tty_struct *tty, struct file *filp)
 
 static void rfcomm_tty_close(struct tty_struct *tty, struct file *filp)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p dlc %p opened %d", tty, dev, dev->dlc,
 						dev->port.count);
@@ -780,17 +771,18 @@ static void rfcomm_tty_close(struct tty_struct *tty, struct file *filp)
 	tty_port_close(&dev->port, tty, filp);
 }
 
-static int rfcomm_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+static ssize_t rfcomm_tty_write(struct tty_struct *tty, const u8 *buf,
+				size_t count)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 	struct rfcomm_dlc *dlc = dev->dlc;
 	struct sk_buff *skb;
-	int sent = 0, size;
+	size_t sent = 0, size;
 
-	BT_DBG("tty %p count %d", tty, count);
+	BT_DBG("tty %p count %zu", tty, count);
 
 	while (count) {
-		size = min_t(uint, count, dlc->mtu);
+		size = min_t(size_t, count, dlc->mtu);
 
 		skb = rfcomm_wmalloc(dev, size + RFCOMM_SKB_RESERVE, GFP_ATOMIC);
 		if (!skb)
@@ -809,9 +801,9 @@ static int rfcomm_tty_write(struct tty_struct *tty, const unsigned char *buf, in
 	return sent;
 }
 
-static int rfcomm_tty_write_room(struct tty_struct *tty)
+static unsigned int rfcomm_tty_write_room(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 	int room = 0;
 
 	if (dev && dev->dlc)
@@ -839,18 +831,6 @@ static int rfcomm_tty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned l
 		BT_DBG("TIOCMIWAIT");
 		break;
 
-	case TIOCGSERIAL:
-		BT_ERR("TIOCGSERIAL is not supported");
-		return -ENOIOCTLCMD;
-
-	case TIOCSSERIAL:
-		BT_ERR("TIOCSSERIAL is not supported");
-		return -ENOIOCTLCMD;
-
-	case TIOCSERGSTRUCT:
-		BT_ERR("TIOCSERGSTRUCT is not supported");
-		return -ENOIOCTLCMD;
-
 	case TIOCSERGETLSR:
 		BT_ERR("TIOCSERGETLSR is not supported");
 		return -ENOIOCTLCMD;
@@ -867,7 +847,8 @@ static int rfcomm_tty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned l
 	return -ENOIOCTLCMD;
 }
 
-static void rfcomm_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
+static void rfcomm_tty_set_termios(struct tty_struct *tty,
+				   const struct ktermios *old)
 {
 	struct ktermios *new = &tty->termios;
 	int old_baud_rate = tty_termios_baud_rate(old);
@@ -876,7 +857,7 @@ static void rfcomm_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 	u8 baud, data_bits, stop_bits, parity, x_on, x_off;
 	u16 changes = 0;
 
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p termios %p", tty, old);
 
@@ -994,7 +975,7 @@ static void rfcomm_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 		baud = RFCOMM_RPN_BR_230400;
 		break;
 	default:
-		/* 9600 is standard accordinag to the RFCOMM specification */
+		/* 9600 is standard according to the RFCOMM specification */
 		baud = RFCOMM_RPN_BR_9600;
 		break;
 
@@ -1008,7 +989,7 @@ static void rfcomm_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 
 static void rfcomm_tty_throttle(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
@@ -1017,16 +998,16 @@ static void rfcomm_tty_throttle(struct tty_struct *tty)
 
 static void rfcomm_tty_unthrottle(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
 	rfcomm_dlc_unthrottle(dev->dlc);
 }
 
-static int rfcomm_tty_chars_in_buffer(struct tty_struct *tty)
+static unsigned int rfcomm_tty_chars_in_buffer(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
@@ -1041,7 +1022,7 @@ static int rfcomm_tty_chars_in_buffer(struct tty_struct *tty)
 
 static void rfcomm_tty_flush_buffer(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
@@ -1052,7 +1033,7 @@ static void rfcomm_tty_flush_buffer(struct tty_struct *tty)
 	tty_wakeup(tty);
 }
 
-static void rfcomm_tty_send_xchar(struct tty_struct *tty, char ch)
+static void rfcomm_tty_send_xchar(struct tty_struct *tty, u8 ch)
 {
 	BT_DBG("tty %p ch %c", tty, ch);
 }
@@ -1064,7 +1045,7 @@ static void rfcomm_tty_wait_until_sent(struct tty_struct *tty, int timeout)
 
 static void rfcomm_tty_hangup(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
@@ -1073,7 +1054,7 @@ static void rfcomm_tty_hangup(struct tty_struct *tty)
 
 static int rfcomm_tty_tiocmget(struct tty_struct *tty)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 
 	BT_DBG("tty %p dev %p", tty, dev);
 
@@ -1082,7 +1063,7 @@ static int rfcomm_tty_tiocmget(struct tty_struct *tty)
 
 static int rfcomm_tty_tiocmset(struct tty_struct *tty, unsigned int set, unsigned int clear)
 {
-	struct rfcomm_dev *dev = (struct rfcomm_dev *) tty->driver_data;
+	struct rfcomm_dev *dev = tty->driver_data;
 	struct rfcomm_dlc *dlc = dev->dlc;
 	u8 v24_sig;
 
@@ -1139,9 +1120,10 @@ int __init rfcomm_init_ttys(void)
 {
 	int error;
 
-	rfcomm_tty_driver = alloc_tty_driver(RFCOMM_TTY_PORTS);
-	if (!rfcomm_tty_driver)
-		return -ENOMEM;
+	rfcomm_tty_driver = tty_alloc_driver(RFCOMM_TTY_PORTS,
+			TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
+	if (IS_ERR(rfcomm_tty_driver))
+		return PTR_ERR(rfcomm_tty_driver);
 
 	rfcomm_tty_driver->driver_name	= "rfcomm";
 	rfcomm_tty_driver->name		= "rfcomm";
@@ -1149,7 +1131,6 @@ int __init rfcomm_init_ttys(void)
 	rfcomm_tty_driver->minor_start	= RFCOMM_TTY_MINOR;
 	rfcomm_tty_driver->type		= TTY_DRIVER_TYPE_SERIAL;
 	rfcomm_tty_driver->subtype	= SERIAL_TYPE_NORMAL;
-	rfcomm_tty_driver->flags	= TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
 	rfcomm_tty_driver->init_termios	= tty_std_termios;
 	rfcomm_tty_driver->init_termios.c_cflag	= B9600 | CS8 | CREAD | HUPCL;
 	rfcomm_tty_driver->init_termios.c_lflag &= ~ICANON;
@@ -1158,7 +1139,7 @@ int __init rfcomm_init_ttys(void)
 	error = tty_register_driver(rfcomm_tty_driver);
 	if (error) {
 		BT_ERR("Can't register RFCOMM TTY driver");
-		put_tty_driver(rfcomm_tty_driver);
+		tty_driver_kref_put(rfcomm_tty_driver);
 		return error;
 	}
 
@@ -1170,5 +1151,5 @@ int __init rfcomm_init_ttys(void)
 void rfcomm_cleanup_ttys(void)
 {
 	tty_unregister_driver(rfcomm_tty_driver);
-	put_tty_driver(rfcomm_tty_driver);
+	tty_driver_kref_put(rfcomm_tty_driver);
 }

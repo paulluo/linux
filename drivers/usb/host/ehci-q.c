@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2001-2004 by David Brownell
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /* this file is part of ehci-hcd.c */
@@ -42,12 +29,13 @@
 
 /* fill a qtd, returning how much of the buffer we were able to queue up */
 
-static int
+static unsigned int
 qtd_fill(struct ehci_hcd *ehci, struct ehci_qtd *qtd, dma_addr_t buf,
 		  size_t len, int token, int maxpacket)
 {
-	int	i, count;
+	unsigned int count;
 	u64	addr = buf;
+	int	i;
 
 	/* one buffer entry per 4K ... first might be short or unaligned */
 	qtd->hw_buf[0] = cpu_to_hc32(ehci, (u32)addr);
@@ -203,7 +191,7 @@ static int qtd_copy_status (
 	int	status = -EINPROGRESS;
 
 	/* count IN/OUT bytes, not SETUP (even short packets) */
-	if (likely (QTD_PID (token) != 2))
+	if (likely(QTD_PID(token) != PID_CODE_SETUP))
 		urb->actual_length += length - QTD_LENGTH (token);
 
 	/* don't modify error codes */
@@ -219,6 +207,13 @@ static int qtd_copy_status (
 		if (token & QTD_STS_BABBLE) {
 			/* FIXME "must" disable babbling device's port too */
 			status = -EOVERFLOW;
+		/*
+		 * When MMF is active and PID Code is IN, queue is halted.
+		 * EHCI Specification, Table 4-13.
+		 */
+		} else if ((token & QTD_STS_MMF) &&
+					(QTD_PID(token) == PID_CODE_IN)) {
+			status = -EPROTO;
 		/* CERR nonzero + halt --> stall */
 		} else if (QTD_CERR(token)) {
 			status = -EPIPE;
@@ -231,7 +226,7 @@ static int qtd_copy_status (
 			/* fs/ls interrupt xfer missed the complete-split */
 			status = -EPROTO;
 		} else if (token & QTD_STS_DBE) {
-			status = (QTD_PID (token) == 1) /* IN ? */
+			status = (QTD_PID(token) == PID_CODE_IN) /* IN ? */
 				? -ENOSR  /* hc couldn't read data */
 				: -ECOMM; /* hc couldn't write data */
 		} else if (token & QTD_STS_XACT) {
@@ -258,12 +253,12 @@ ehci_urb_done(struct ehci_hcd *ehci, struct urb *urb, int status)
 	}
 
 	if (unlikely(urb->unlinked)) {
-		COUNT(ehci->stats.unlink);
+		INCR(ehci->stats.unlink);
 	} else {
 		/* report non-error and short read status as zero */
 		if (status == -EINPROGRESS || status == -EREMOTEIO)
 			status = 0;
-		COUNT(ehci->stats.complete);
+		INCR(ehci->stats.complete);
 	}
 
 #ifdef EHCI_URB_TRACE
@@ -607,7 +602,7 @@ qh_urb_transaction (
 		/* SETUP pid */
 		qtd_fill(ehci, qtd, urb->setup_dma,
 				sizeof (struct usb_ctrlrequest),
-				token | (2 /* "setup" */ << 8), 8);
+				token | (PID_CODE_SETUP << 8), 8);
 
 		/* ... and always at least one more pid */
 		token ^= QTD_TOGGLE;
@@ -621,7 +616,7 @@ qh_urb_transaction (
 
 		/* for zero length DATA stages, STATUS is always IN */
 		if (len == 0)
-			token |= (1 /* "in" */ << 8);
+			token |= (PID_CODE_IN << 8);
 	}
 
 	/*
@@ -643,10 +638,10 @@ qh_urb_transaction (
 	}
 
 	if (is_input)
-		token |= (1 /* "in" */ << 8);
+		token |= (PID_CODE_IN << 8);
 	/* else it's already initted to "out" pid (0 << 8) */
 
-	maxpacket = usb_maxpacket(urb->dev, urb->pipe, !is_input);
+	maxpacket = usb_endpoint_maxp(&urb->ep->desc);
 
 	/*
 	 * buffer gets wrapped in one or more qtds;
@@ -654,7 +649,7 @@ qh_urb_transaction (
 	 * and may serve as a control status ack
 	 */
 	for (;;) {
-		int this_qtd_len;
+		unsigned int this_qtd_len;
 
 		this_qtd_len = qtd_fill(ehci, qtd, buf, this_sg_len, token,
 				maxpacket);
@@ -710,7 +705,7 @@ qh_urb_transaction (
 
 		if (usb_pipecontrol (urb->pipe)) {
 			one_more = 1;
-			token ^= 0x0100;	/* "in" <--> "out"  */
+			token ^= (PID_CODE_IN << 8);	/* "in" <--> "out"  */
 			token |= QTD_TOGGLE;	/* force DATA1 */
 		} else if (usb_pipeout(urb->pipe)
 				&& (urb->transfer_flags & URB_ZERO_PACKET)
@@ -876,7 +871,7 @@ qh_make (
 	switch (urb->dev->speed) {
 	case USB_SPEED_LOW:
 		info1 |= QH_LOW_SPEED;
-		/* FALL THROUGH */
+		fallthrough;
 
 	case USB_SPEED_FULL:
 		/* EPS 0 means "full" */
@@ -1163,11 +1158,11 @@ submit_async (
  * This is done in two parts: first SETUP req for GetDesc is sent then
  * 15 seconds later, the IN stage for GetDesc starts to req data from dev
  *
- * is_setup : i/p arguement decides which of the two stage needs to be
+ * is_setup : i/p argument decides which of the two stage needs to be
  * performed; TRUE - SETUP and FALSE - IN+STATUS
  * Returns 0 if success
  */
-static int submit_single_step_set_feature(
+static int ehci_submit_single_step_set_feature(
 	struct usb_hcd  *hcd,
 	struct urb      *urb,
 	int             is_setup
@@ -1201,10 +1196,10 @@ static int submit_single_step_set_feature(
 	 * 15 secs after the setup
 	 */
 	if (is_setup) {
-		/* SETUP pid */
+		/* SETUP pid, and interrupt after SETUP completion */
 		qtd_fill(ehci, qtd, urb->setup_dma,
 				sizeof(struct usb_ctrlrequest),
-				token | (2 /* "setup" */ << 8), 8);
+				QTD_IOC | token | (PID_CODE_SETUP << 8), 8);
 
 		submit_async(ehci, urb, &qtd_list, GFP_ATOMIC);
 		return 0; /*Return now; we shall come back after 15 seconds*/
@@ -1217,9 +1212,9 @@ static int submit_single_step_set_feature(
 	token ^= QTD_TOGGLE;   /*We need to start IN with DATA-1 Pid-sequence*/
 	buf = urb->transfer_dma;
 
-	token |= (1 /* "in" */ << 8);  /*This is IN stage*/
+	token |= (PID_CODE_IN << 8);  /*This is IN stage*/
 
-	maxpacket = usb_maxpacket(urb->dev, urb->pipe, 0);
+	maxpacket = usb_endpoint_maxp(&urb->ep->desc);
 
 	qtd_fill(ehci, qtd, buf, len, token, maxpacket);
 
@@ -1230,7 +1225,7 @@ static int submit_single_step_set_feature(
 	qtd->hw_alt_next = EHCI_LIST_END(ehci);
 
 	/* STATUS stage for GetDesc control request */
-	token ^= 0x0100;        /* "in" <--> "out"  */
+	token ^= (PID_CODE_IN << 8);        /* "in" <--> "out"  */
 	token |= QTD_TOGGLE;    /* force DATA1 */
 
 	qtd_prev = qtd;
@@ -1241,12 +1236,8 @@ static int submit_single_step_set_feature(
 	qtd_prev->hw_next = QTD_NEXT(ehci, qtd->qtd_dma);
 	list_add_tail(&qtd->qtd_list, head);
 
-	/* dont fill any data in such packets */
-	qtd_fill(ehci, qtd, 0, 0, token, 0);
-
-	/* by default, enable interrupt on urb completion */
-	if (likely(!(urb->transfer_flags & URB_NO_INTERRUPT)))
-		qtd->hw_token |= cpu_to_hc32(ehci, QTD_IOC);
+	/* Interrupt after STATUS completion */
+	qtd_fill(ehci, qtd, 0, 0, token | QTD_IOC, 0);
 
 	submit_async(ehci, urb, &qtd_list, GFP_KERNEL);
 

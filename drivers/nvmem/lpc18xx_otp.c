@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * NXP LPC18xx/43xx OTP memory NVMEM driver
  *
@@ -6,10 +7,6 @@
  * Based on the imx ocotp driver,
  * Copyright (c) 2015 Pengutronix, Philipp Zabel <p.zabel@pengutronix.de>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
  * TODO: add support for writing OTP register via API in boot ROM.
  */
 
@@ -17,7 +14,6 @@
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -25,7 +21,7 @@
  * LPC18xx OTP memory contains 4 banks with 4 32-bit words. Bank 0 starts
  * at offset 0 from the base.
  *
- * Bank 0 contains the part ID for Flashless devices and is reseverd for
+ * Bank 0 contains the part ID for Flashless devices and is reserved for
  * devices with Flash.
  * Bank 1/2 is generale purpose or AES key storage for secure devices.
  * Bank 3 contains control data, USB ID and generale purpose words.
@@ -64,7 +60,6 @@ static struct nvmem_config lpc18xx_otp_nvmem_config = {
 	.read_only = true,
 	.word_size = LPC18XX_OTP_WORD_SIZE,
 	.stride = LPC18XX_OTP_WORD_SIZE,
-	.owner = THIS_MODULE,
 	.reg_read = lpc18xx_otp_read,
 };
 
@@ -72,14 +67,12 @@ static int lpc18xx_otp_probe(struct platform_device *pdev)
 {
 	struct nvmem_device *nvmem;
 	struct lpc18xx_otp *otp;
-	struct resource *res;
 
 	otp = devm_kzalloc(&pdev->dev, sizeof(*otp), GFP_KERNEL);
 	if (!otp)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	otp->base = devm_ioremap_resource(&pdev->dev, res);
+	otp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(otp->base))
 		return PTR_ERR(otp->base);
 
@@ -87,20 +80,9 @@ static int lpc18xx_otp_probe(struct platform_device *pdev)
 	lpc18xx_otp_nvmem_config.dev = &pdev->dev;
 	lpc18xx_otp_nvmem_config.priv = otp;
 
-	nvmem = nvmem_register(&lpc18xx_otp_nvmem_config);
-	if (IS_ERR(nvmem))
-		return PTR_ERR(nvmem);
+	nvmem = devm_nvmem_register(&pdev->dev, &lpc18xx_otp_nvmem_config);
 
-	platform_set_drvdata(pdev, nvmem);
-
-	return 0;
-}
-
-static int lpc18xx_otp_remove(struct platform_device *pdev)
-{
-	struct nvmem_device *nvmem = platform_get_drvdata(pdev);
-
-	return nvmem_unregister(nvmem);
+	return PTR_ERR_OR_ZERO(nvmem);
 }
 
 static const struct of_device_id lpc18xx_otp_dt_ids[] = {
@@ -111,7 +93,6 @@ MODULE_DEVICE_TABLE(of, lpc18xx_otp_dt_ids);
 
 static struct platform_driver lpc18xx_otp_driver = {
 	.probe	= lpc18xx_otp_probe,
-	.remove	= lpc18xx_otp_remove,
 	.driver = {
 		.name	= "lpc18xx_otp",
 		.of_match_table = lpc18xx_otp_dt_ids,

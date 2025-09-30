@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * f_phonet.c -- USB CDC Phonet function
  *
  * Copyright (C) 2007-2008 Nokia Corporation. All rights reserved.
  *
  * Author: Rémi Denis-Courmont
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
  */
 
 #include <linux/mm.h>
@@ -51,7 +48,7 @@ struct f_phonet {
 	struct usb_ep			*in_ep, *out_ep;
 
 	struct usb_request		*in_req;
-	struct usb_request		*out_reqv[0];
+	struct usb_request		*out_reqv[];
 };
 
 static int phonet_rxq_size = 17;
@@ -215,6 +212,7 @@ static void pn_tx_complete(struct usb_ep *ep, struct usb_request *req)
 	case -ESHUTDOWN: /* disconnected */
 	case -ECONNRESET: /* disabled */
 		dev->stats.tx_aborted_errors++;
+		fallthrough;
 	default:
 		dev->stats.tx_errors++;
 	}
@@ -223,7 +221,7 @@ static void pn_tx_complete(struct usb_ep *ep, struct usb_request *req)
 	netif_wake_queue(dev);
 }
 
-static int pn_net_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t pn_net_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct phonet_port *port = netdev_priv(dev);
 	struct f_phonet *fp;
@@ -269,6 +267,8 @@ static const struct net_device_ops pn_netdev_ops = {
 
 static void pn_net_setup(struct net_device *dev)
 {
+	const u8 addr = PN_MEDIA_USB;
+
 	dev->features		= 0;
 	dev->type		= ARPHRD_PHONET;
 	dev->flags		= IFF_POINTOPOINT | IFF_NOARP;
@@ -276,8 +276,9 @@ static void pn_net_setup(struct net_device *dev)
 	dev->min_mtu		= PHONET_MIN_MTU;
 	dev->max_mtu		= PHONET_MAX_MTU;
 	dev->hard_header_len	= 1;
-	dev->dev_addr[0]	= PN_MEDIA_USB;
 	dev->addr_len		= 1;
+	dev_addr_set(dev, &addr);
+
 	dev->tx_queue_len	= 1;
 
 	dev->netdev_ops		= &pn_netdev_ops;
@@ -362,6 +363,7 @@ static void pn_rx_complete(struct usb_ep *ep, struct usb_request *req)
 	/* Do resubmit in these cases: */
 	case -EOVERFLOW: /* request buffer overflow */
 		dev->stats.rx_over_errors++;
+		fallthrough;
 	default:
 		dev->stats.rx_errors++;
 		break;
@@ -599,7 +601,7 @@ static struct configfs_attribute *phonet_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type phonet_func_type = {
+static const struct config_item_type phonet_func_type = {
 	.ct_item_ops	= &phonet_item_ops,
 	.ct_attrs	= phonet_attrs,
 	.ct_owner	= THIS_MODULE,
@@ -666,10 +668,8 @@ static struct usb_function *phonet_alloc(struct usb_function_instance *fi)
 {
 	struct f_phonet *fp;
 	struct f_phonet_opts *opts;
-	int size;
 
-	size = sizeof(*fp) + (phonet_rxq_size * sizeof(struct usb_request *));
-	fp = kzalloc(size, GFP_KERNEL);
+	fp = kzalloc(struct_size(fp, out_reqv, phonet_rxq_size), GFP_KERNEL);
 	if (!fp)
 		return ERR_PTR(-ENOMEM);
 
@@ -729,4 +729,5 @@ void gphonet_cleanup(struct net_device *dev)
 
 DECLARE_USB_FUNCTION_INIT(phonet, phonet_alloc_inst, phonet_alloc);
 MODULE_AUTHOR("Rémi Denis-Courmont");
+MODULE_DESCRIPTION("USB CDC Phonet function");
 MODULE_LICENSE("GPL");

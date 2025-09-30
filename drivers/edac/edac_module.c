@@ -19,7 +19,8 @@
 
 #ifdef CONFIG_EDAC_DEBUG
 
-static int edac_set_debug_level(const char *buf, struct kernel_param *kp)
+static int edac_set_debug_level(const char *buf,
+				const struct kernel_param *kp)
 {
 	unsigned long val;
 	int ret;
@@ -66,7 +67,7 @@ char *edac_op_state_to_string(int opstate)
  * sysfs object: /sys/devices/system/edac
  *	need to export to other files
  */
-static struct bus_type edac_subsys = {
+static const struct bus_type edac_subsys = {
 	.name = "edac",
 	.dev_name = "edac",
 };
@@ -89,7 +90,7 @@ static void edac_subsys_exit(void)
 }
 
 /* return pointer to the 'edac' node in sysfs */
-struct bus_type *edac_get_sysfs_subsys(void)
+const struct bus_type *edac_get_sysfs_subsys(void)
 {
 	return &edac_subsys;
 }

@@ -1,7 +1,6 @@
 #include <linux/signal.h>
+#include "signal.h"
 
-#define SIGUNKNOWN 0
-#define MAXMAPPED_SIG 35
 /* provide a mapping of arch signal to internal signal # for mediation
  * those that are always an alias SIGCLD for SIGCLHD and SIGPOLL for SIGIO
  * map to the same entry those that may/or may not get a separate entry
@@ -56,7 +55,7 @@ static const int sig_map[MAXMAPPED_SIG] = {
 };
 
 /* this table is ordered post sig_map[sig] mapping */
-static const char *const sig_names[MAXMAPPED_SIG + 1] = {
+static const char *const sig_names[MAXMAPPED_SIGNAME] = {
 	"unknown",
 	"hup",
 	"int",

@@ -73,19 +73,21 @@ register. write_control_reg sends the new control register value to the DSP. */
 static int write_control_reg(struct echoaudio *chip, u32 ctl, u32 frq,
 			     char force)
 {
+	__le32 ctl_reg, frq_reg;
+
 	if (wait_handshake(chip))
 		return -EIO;
 
 	dev_dbg(chip->card->dev,
 		"WriteControlReg: Setting 0x%x, 0x%x\n", ctl, frq);
 
-	ctl = cpu_to_le32(ctl);
-	frq = cpu_to_le32(frq);
+	ctl_reg = cpu_to_le32(ctl);
+	frq_reg = cpu_to_le32(frq);
 
-	if (ctl != chip->comm_page->control_register ||
-	    frq != chip->comm_page->e3g_frq_register || force) {
-		chip->comm_page->e3g_frq_register = frq;
-		chip->comm_page->control_register = ctl;
+	if (ctl_reg != chip->comm_page->control_register ||
+	    frq_reg != chip->comm_page->e3g_frq_register || force) {
+		chip->comm_page->e3g_frq_register = frq_reg;
+		chip->comm_page->control_register = ctl_reg;
 		clear_handshake(chip);
 		return send_vector(chip, DSP_VC_WRITE_CONTROL_REG);
 	}
@@ -272,7 +274,6 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 		       chip->digital_mode == DIGITAL_MODE_ADAT))
 		return -EINVAL;
 
-	clock = 0;
 	control_reg = le32_to_cpu(chip->comm_page->control_register);
 	control_reg &= E3G_CLOCK_CLEAR_MASK;
 

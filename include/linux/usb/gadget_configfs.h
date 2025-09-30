@@ -1,10 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __GADGET_CONFIGFS__
 #define __GADGET_CONFIGFS__
 
 #include <linux/configfs.h>
-
-int check_user_usb_string(const char *name,
-		struct usb_gadget_strings *stringtab_dev);
 
 #define GS_STRINGS_W(__struct, __name)	\
 static ssize_t __struct##_##__name##_store(struct config_item *item, \
@@ -36,7 +34,7 @@ static struct configfs_item_operations struct_in##_langid_item_ops = {	\
 	.release                = struct_in##_attr_release,		\
 };									\
 									\
-static struct config_item_type struct_in##_langid_type = {		\
+static const struct config_item_type struct_in##_langid_type = {	\
 	.ct_item_ops	= &struct_in##_langid_item_ops,			\
 	.ct_attrs	= struct_in##_langid_attrs,			\
 	.ct_owner	= THIS_MODULE,					\
@@ -93,7 +91,7 @@ static struct configfs_group_operations struct_in##_strings_ops = {	\
 	.drop_item      = &struct_in##_strings_drop,			\
 };									\
 									\
-static struct config_item_type struct_in##_strings_type = {		\
+static const struct config_item_type struct_in##_strings_type = {	\
 	.ct_group_ops   = &struct_in##_strings_ops,			\
 	.ct_owner       = THIS_MODULE,					\
 }

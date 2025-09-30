@@ -25,58 +25,57 @@
 #ifndef _I915_PARAMS_H_
 #define _I915_PARAMS_H_
 
+#include <linux/bitops.h>
 #include <linux/cache.h> /* for __read_mostly */
 
-#define I915_PARAMS_FOR_EACH(func) \
-	func(char *, vbt_firmware); \
-	func(int, modeset); \
-	func(int, panel_ignore_lid); \
-	func(int, semaphores); \
-	func(int, lvds_channel_mode); \
-	func(int, panel_use_ssc); \
-	func(int, vbt_sdvo_panel_type); \
-	func(int, enable_rc6); \
-	func(int, enable_dc); \
-	func(int, enable_fbc); \
-	func(int, enable_ppgtt); \
-	func(int, enable_execlists); \
-	func(int, enable_psr); \
-	func(int, disable_power_well); \
-	func(int, enable_ips); \
-	func(int, invert_brightness); \
-	func(int, enable_guc_loading); \
-	func(int, enable_guc_submission); \
-	func(int, guc_log_level); \
-	func(char *, guc_firmware_path); \
-	func(char *, huc_firmware_path); \
-	func(int, use_mmio_flip); \
-	func(int, mmio_debug); \
-	func(int, edp_vswing); \
-	func(int, reset); \
-	func(unsigned int, inject_load_failure); \
-	/* leave bools at the end to not create holes */ \
-	func(bool, alpha_support); \
-	func(bool, enable_cmd_parser); \
-	func(bool, enable_hangcheck); \
-	func(bool, fastboot); \
-	func(bool, prefault_disable); \
-	func(bool, load_detect_test); \
-	func(bool, force_reset_modeset_test); \
-	func(bool, error_capture); \
-	func(bool, disable_display); \
-	func(bool, verbose_state_checks); \
-	func(bool, nuclear_pageflip); \
-	func(bool, enable_dp_mst); \
-	func(bool, enable_dpcd_backlight); \
-	func(bool, enable_gvt)
+struct drm_printer;
 
-#define MEMBER(T, member) T member
+#define ENABLE_GUC_SUBMISSION		BIT(0)
+#define ENABLE_GUC_LOAD_HUC		BIT(1)
+#define ENABLE_GUC_MASK			GENMASK(1, 0)
+
+/*
+ * Invoke param, a function-like macro, for each i915 param, with arguments:
+ *
+ * param(type, name, value, mode)
+ *
+ * type: parameter type, one of {bool, int, unsigned int, unsigned long, char *}
+ * name: name of the parameter
+ * value: initial/default value of the parameter
+ * mode: debugfs file permissions, one of {0400, 0600, 0}, use 0 to not create
+ *       debugfs file
+ */
+#define I915_PARAMS_FOR_EACH(param) \
+	param(int, modeset, -1, 0400) \
+	param(int, enable_guc, -1, 0400) \
+	param(int, guc_log_level, -1, 0400) \
+	param(char *, guc_firmware_path, NULL, 0400) \
+	param(char *, huc_firmware_path, NULL, 0400) \
+	param(char *, gsc_firmware_path, NULL, 0400) \
+	param(bool, memtest, false, 0400) \
+	param(int, mmio_debug, -IS_ENABLED(CONFIG_DRM_I915_DEBUG_MMIO), 0600) \
+	param(unsigned int, reset, 3, 0600) \
+	param(unsigned int, inject_probe_failure, 0, 0) \
+	param(char *, force_probe, CONFIG_DRM_I915_FORCE_PROBE, 0400) \
+	param(unsigned int, request_timeout_ms, CONFIG_DRM_I915_REQUEST_TIMEOUT, CONFIG_DRM_I915_REQUEST_TIMEOUT ? 0600 : 0) \
+	param(unsigned int, lmem_size, 0, 0400) \
+	param(unsigned int, lmem_bar_size, 0, 0400) \
+	/* leave bools at the end to not create holes */ \
+	param(bool, enable_hangcheck, true, 0600) \
+	param(bool, error_capture, true, IS_ENABLED(CONFIG_DRM_I915_CAPTURE_ERROR) ? 0600 : 0) \
+	param(bool, enable_gvt, false, IS_ENABLED(CONFIG_DRM_I915_GVT) ? 0400 : 0) \
+	param(bool, enable_debug_only_api, false, IS_ENABLED(CONFIG_DRM_I915_REPLAY_GPU_HANGS_API) ? 0400 : 0)
+
+#define MEMBER(T, member, ...) T member;
 struct i915_params {
 	I915_PARAMS_FOR_EACH(MEMBER);
 };
 #undef MEMBER
 
-extern struct i915_params i915 __read_mostly;
+extern struct i915_params i915_modparams __read_mostly;
+
+void i915_params_dump(const struct i915_params *params, struct drm_printer *p);
+void i915_params_copy(struct i915_params *dest, const struct i915_params *src);
+void i915_params_free(struct i915_params *params);
 
 #endif
-

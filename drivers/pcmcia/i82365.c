@@ -875,7 +875,7 @@ static irqreturn_t pcic_interrupt(int irq, void *dev)
     return IRQ_RETVAL(handled);
 } /* pcic_interrupt */
 
-static void pcic_interrupt_wrapper(u_long data)
+static void pcic_interrupt_wrapper(struct timer_list *unused)
 {
     pcic_interrupt(0, NULL);
     poll_timer.expires = jiffies + poll_interval;
@@ -1289,9 +1289,7 @@ static int __init init_i82365(void)
 
     /* Finally, schedule a polling interrupt */
     if (poll_interval != 0) {
-	poll_timer.function = pcic_interrupt_wrapper;
-	poll_timer.data = 0;
-	init_timer(&poll_timer);
+	timer_setup(&poll_timer, pcic_interrupt_wrapper, 0);
     	poll_timer.expires = jiffies + poll_interval;
 	add_timer(&poll_timer);
     }
@@ -1326,7 +1324,7 @@ static void __exit exit_i82365(void)
     }
     platform_device_unregister(i82365_device);
     if (poll_interval != 0)
-	del_timer_sync(&poll_timer);
+	timer_delete_sync(&poll_timer);
     if (grab_irq != 0)
 	free_irq(cs_irq, pcic_interrupt);
     for (i = 0; i < sockets; i++) {
@@ -1344,5 +1342,6 @@ static void __exit exit_i82365(void)
 
 module_init(init_i82365);
 module_exit(exit_i82365);
+MODULE_DESCRIPTION("Driver for Intel 82365 and compatible PC Card controllers");
 MODULE_LICENSE("Dual MPL/GPL");
 /*====================================================================*/

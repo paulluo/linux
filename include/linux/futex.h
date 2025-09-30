@@ -1,18 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_FUTEX_H
 #define _LINUX_FUTEX_H
 
+#include <linux/sched.h>
 #include <linux/ktime.h>
+#include <linux/mm_types.h>
+
 #include <uapi/linux/futex.h>
 
 struct inode;
-struct mm_struct;
 struct task_struct;
-
-long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
-	      u32 __user *uaddr2, u32 val2, u32 val3);
-
-extern int
-handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int pi);
 
 /*
  * Futexes are matched on equal values of this key.
@@ -34,43 +31,90 @@ handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int pi);
 
 union futex_key {
 	struct {
+		u64 i_seq;
 		unsigned long pgoff;
-		struct inode *inode;
-		int offset;
+		unsigned int offset;
+		/* unsigned int node; */
 	} shared;
 	struct {
+		union {
+			struct mm_struct *mm;
+			u64 __tmp;
+		};
 		unsigned long address;
-		struct mm_struct *mm;
-		int offset;
+		unsigned int offset;
+		/* unsigned int node; */
 	} private;
 	struct {
+		u64 ptr;
 		unsigned long word;
-		void *ptr;
-		int offset;
+		unsigned int offset;
+		unsigned int node;	/* NOT hashed! */
 	} both;
 };
 
-#define FUTEX_KEY_INIT (union futex_key) { .both = { .ptr = NULL } }
+#define FUTEX_KEY_INIT (union futex_key) { .both = { .ptr = 0ULL } }
 
 #ifdef CONFIG_FUTEX
-extern void exit_robust_list(struct task_struct *curr);
-#ifdef CONFIG_HAVE_FUTEX_CMPXCHG
-#define futex_cmpxchg_enabled 1
-#else
-extern int futex_cmpxchg_enabled;
-#endif
-#else
-static inline void exit_robust_list(struct task_struct *curr)
-{
-}
-#endif
+enum {
+	FUTEX_STATE_OK,
+	FUTEX_STATE_EXITING,
+	FUTEX_STATE_DEAD,
+};
 
-#ifdef CONFIG_FUTEX_PI
-extern void exit_pi_state_list(struct task_struct *curr);
-#else
-static inline void exit_pi_state_list(struct task_struct *curr)
+static inline void futex_init_task(struct task_struct *tsk)
 {
+	tsk->robust_list = NULL;
+#ifdef CONFIG_COMPAT
+	tsk->compat_robust_list = NULL;
+#endif
+	INIT_LIST_HEAD(&tsk->pi_state_list);
+	tsk->pi_state_cache = NULL;
+	tsk->futex_state = FUTEX_STATE_OK;
+	mutex_init(&tsk->futex_exit_mutex);
 }
+
+void futex_exit_recursive(struct task_struct *tsk);
+void futex_exit_release(struct task_struct *tsk);
+void futex_exec_release(struct task_struct *tsk);
+
+long do_futex(u32 __user *uaddr, int op, u32 val, ktime_t *timeout,
+	      u32 __user *uaddr2, u32 val2, u32 val3);
+int futex_hash_prctl(unsigned long arg2, unsigned long arg3, unsigned long arg4);
+
+#ifdef CONFIG_FUTEX_PRIVATE_HASH
+int futex_hash_allocate_default(void);
+void futex_hash_free(struct mm_struct *mm);
+int futex_mm_init(struct mm_struct *mm);
+
+#else /* !CONFIG_FUTEX_PRIVATE_HASH */
+static inline int futex_hash_allocate_default(void) { return 0; }
+static inline int futex_hash_free(struct mm_struct *mm) { return 0; }
+static inline int futex_mm_init(struct mm_struct *mm) { return 0; }
+#endif /* CONFIG_FUTEX_PRIVATE_HASH */
+
+#else /* !CONFIG_FUTEX */
+static inline void futex_init_task(struct task_struct *tsk) { }
+static inline void futex_exit_recursive(struct task_struct *tsk) { }
+static inline void futex_exit_release(struct task_struct *tsk) { }
+static inline void futex_exec_release(struct task_struct *tsk) { }
+static inline long do_futex(u32 __user *uaddr, int op, u32 val,
+			    ktime_t *timeout, u32 __user *uaddr2,
+			    u32 val2, u32 val3)
+{
+	return -EINVAL;
+}
+static inline int futex_hash_prctl(unsigned long arg2, unsigned long arg3, unsigned long arg4)
+{
+	return -EINVAL;
+}
+static inline int futex_hash_allocate_default(void)
+{
+	return 0;
+}
+static inline int futex_hash_free(struct mm_struct *mm) { return 0; }
+static inline int futex_mm_init(struct mm_struct *mm) { return 0; }
+
 #endif
 
 #endif

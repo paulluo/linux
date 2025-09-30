@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SPARC_PTRACE_H
 #define __SPARC_PTRACE_H
 
@@ -6,6 +7,7 @@
 #if defined(__sparc__) && defined(__arch64__)
 #ifndef __ASSEMBLY__
 
+#include <linux/compiler.h>
 #include <linux/threads.h>
 #include <asm/switch_to.h>
 
@@ -24,12 +26,12 @@ static inline bool pt_regs_clear_syscall(struct pt_regs *regs)
 	return (regs->tstate &= ~TSTATE_SYSCALL);
 }
 
-#define arch_ptrace_stop_needed(exit_code, info) \
+#define arch_ptrace_stop_needed() \
 ({	flush_user_windows(); \
 	get_thread_wsaved() != 0; \
 })
 
-#define arch_ptrace_stop(exit_code, info) \
+#define arch_ptrace_stop() \
 	synchronize_user_stack()
 
 #define current_pt_regs() \
@@ -127,12 +129,12 @@ static inline bool pt_regs_clear_syscall(struct pt_regs *regs)
 	return (regs->psr &= ~PSR_SYSCALL);
 }
 
-#define arch_ptrace_stop_needed(exit_code, info) \
+#define arch_ptrace_stop_needed() \
 ({	flush_user_windows(); \
 	current_thread_info()->w_saved != 0;	\
 })
 
-#define arch_ptrace_stop(exit_code, info) \
+#define arch_ptrace_stop() \
 	synchronize_user_stack()
 
 #define current_pt_regs() \

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/hfsplus/unicode.c
  *
@@ -39,6 +40,18 @@ int hfsplus_strcasecmp(const struct hfsplus_unistr *s1,
 	p1 = s1->unicode;
 	p2 = s2->unicode;
 
+	if (len1 > HFSPLUS_MAX_STRLEN) {
+		len1 = HFSPLUS_MAX_STRLEN;
+		pr_err("invalid length %u has been corrected to %d\n",
+			be16_to_cpu(s1->length), len1);
+	}
+
+	if (len2 > HFSPLUS_MAX_STRLEN) {
+		len2 = HFSPLUS_MAX_STRLEN;
+		pr_err("invalid length %u has been corrected to %d\n",
+			be16_to_cpu(s2->length), len2);
+	}
+
 	while (1) {
 		c1 = c2 = 0;
 
@@ -72,6 +85,18 @@ int hfsplus_strcmp(const struct hfsplus_unistr *s1,
 	len2 = be16_to_cpu(s2->length);
 	p1 = s1->unicode;
 	p2 = s2->unicode;
+
+	if (len1 > HFSPLUS_MAX_STRLEN) {
+		len1 = HFSPLUS_MAX_STRLEN;
+		pr_err("invalid length %u has been corrected to %d\n",
+			be16_to_cpu(s1->length), len1);
+	}
+
+	if (len2 > HFSPLUS_MAX_STRLEN) {
+		len2 = HFSPLUS_MAX_STRLEN;
+		pr_err("invalid length %u has been corrected to %d\n",
+			be16_to_cpu(s2->length), len2);
+	}
 
 	for (len = min(len1, len2); len > 0; len--) {
 		c1 = be16_to_cpu(*p1);
@@ -118,9 +143,8 @@ static u16 *hfsplus_compose_lookup(u16 *p, u16 cc)
 	return NULL;
 }
 
-int hfsplus_uni2asc(struct super_block *sb,
-		const struct hfsplus_unistr *ustr,
-		char *astr, int *len_p)
+static int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr,
+		    int max_len, char *astr, int *len_p)
 {
 	const hfsplus_unichr *ip;
 	struct nls_table *nls = HFSPLUS_SB(sb)->nls;
@@ -131,7 +155,14 @@ int hfsplus_uni2asc(struct super_block *sb,
 
 	op = astr;
 	ip = ustr->unicode;
+
 	ustrlen = be16_to_cpu(ustr->length);
+	if (ustrlen > max_len) {
+		ustrlen = max_len;
+		pr_err("invalid length %u has been corrected to %d\n",
+			be16_to_cpu(ustr->length), ustrlen);
+	}
+
 	len = *len_p;
 	ce1 = NULL;
 	compose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
@@ -248,6 +279,21 @@ out:
 	return res;
 }
 
+inline int hfsplus_uni2asc_str(struct super_block *sb,
+			       const struct hfsplus_unistr *ustr, char *astr,
+			       int *len_p)
+{
+	return hfsplus_uni2asc(sb, ustr, HFSPLUS_MAX_STRLEN, astr, len_p);
+}
+
+inline int hfsplus_uni2asc_xattr_str(struct super_block *sb,
+				     const struct hfsplus_attr_unistr *ustr,
+				     char *astr, int *len_p)
+{
+	return hfsplus_uni2asc(sb, (const struct hfsplus_unistr *)ustr,
+			       HFSPLUS_ATTR_MAX_STRLEN, astr, len_p);
+}
+
 /*
  * Convert one or more ASCII characters into a single unicode character.
  * Returns the number of ASCII characters corresponding to the unicode char.
@@ -271,8 +317,8 @@ static inline int asc2unichar(struct super_block *sb, const char *astr, int len,
 	return size;
 }
 
-/* Decomposes a single unicode character. */
-static inline u16 *decompose_unichar(wchar_t uc, int *size)
+/* Decomposes a non-Hangul unicode character. */
+static u16 *hfsplus_decompose_nonhangul(wchar_t uc, int *size)
 {
 	int off;
 
@@ -295,6 +341,51 @@ static inline u16 *decompose_unichar(wchar_t uc, int *size)
 	return hfsplus_decompose_table + (off / 4);
 }
 
+/*
+ * Try to decompose a unicode character as Hangul. Return 0 if @uc is not
+ * precomposed Hangul, otherwise return the length of the decomposition.
+ *
+ * This function was adapted from sample code from the Unicode Standard
+ * Annex #15: Unicode Normalization Forms, version 3.2.0.
+ *
+ * Copyright (C) 1991-2018 Unicode, Inc.  All rights reserved.  Distributed
+ * under the Terms of Use in http://www.unicode.org/copyright.html.
+ */
+static int hfsplus_try_decompose_hangul(wchar_t uc, u16 *result)
+{
+	int index;
+	int l, v, t;
+
+	index = uc - Hangul_SBase;
+	if (index < 0 || index >= Hangul_SCount)
+		return 0;
+
+	l = Hangul_LBase + index / Hangul_NCount;
+	v = Hangul_VBase + (index % Hangul_NCount) / Hangul_TCount;
+	t = Hangul_TBase + index % Hangul_TCount;
+
+	result[0] = l;
+	result[1] = v;
+	if (t != Hangul_TBase) {
+		result[2] = t;
+		return 3;
+	}
+	return 2;
+}
+
+/* Decomposes a single unicode character. */
+static u16 *decompose_unichar(wchar_t uc, int *size, u16 *hangul_buffer)
+{
+	u16 *result;
+
+	/* Hangul is handled separately */
+	result = hangul_buffer;
+	*size = hfsplus_try_decompose_hangul(uc, result);
+	if (*size == 0)
+		result = hfsplus_decompose_nonhangul(uc, size);
+	return result;
+}
+
 int hfsplus_asc2uni(struct super_block *sb,
 		    struct hfsplus_unistr *ustr, int max_unistr_len,
 		    const char *astr, int len)
@@ -302,13 +393,14 @@ int hfsplus_asc2uni(struct super_block *sb,
 	int size, dsize, decompose;
 	u16 *dstr, outlen = 0;
 	wchar_t c;
+	u16 dhangul[3];
 
 	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
 	while (outlen < max_unistr_len && len > 0) {
 		size = asc2unichar(sb, astr, len, &c);
 
 		if (decompose)
-			dstr = decompose_unichar(c, &dsize);
+			dstr = decompose_unichar(c, &dsize, dhangul);
 		else
 			dstr = NULL;
 		if (dstr) {
@@ -343,6 +435,7 @@ int hfsplus_hash_dentry(const struct dentry *dentry, struct qstr *str)
 	unsigned long hash;
 	wchar_t c;
 	u16 c2;
+	u16 dhangul[3];
 
 	casefold = test_bit(HFSPLUS_SB_CASEFOLD, &HFSPLUS_SB(sb)->flags);
 	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
@@ -350,13 +443,13 @@ int hfsplus_hash_dentry(const struct dentry *dentry, struct qstr *str)
 	astr = str->name;
 	len = str->len;
 	while (len > 0) {
-		int uninitialized_var(dsize);
+		int dsize;
 		size = asc2unichar(sb, astr, len, &c);
 		astr += size;
 		len -= size;
 
 		if (decompose)
-			dstr = decompose_unichar(c, &dsize);
+			dstr = decompose_unichar(c, &dsize, dhangul);
 		else
 			dstr = NULL;
 		if (dstr) {
@@ -395,6 +488,7 @@ int hfsplus_compare_dentry(const struct dentry *dentry,
 	const char *astr1, *astr2;
 	u16 c1, c2;
 	wchar_t c;
+	u16 dhangul_1[3], dhangul_2[3];
 
 	casefold = test_bit(HFSPLUS_SB_CASEFOLD, &HFSPLUS_SB(sb)->flags);
 	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
@@ -412,7 +506,8 @@ int hfsplus_compare_dentry(const struct dentry *dentry,
 			len1 -= size;
 
 			if (decompose)
-				dstr1 = decompose_unichar(c, &dsize1);
+				dstr1 = decompose_unichar(c, &dsize1,
+							  dhangul_1);
 			if (!decompose || !dstr1) {
 				c1 = c;
 				dstr1 = &c1;
@@ -426,7 +521,8 @@ int hfsplus_compare_dentry(const struct dentry *dentry,
 			len2 -= size;
 
 			if (decompose)
-				dstr2 = decompose_unichar(c, &dsize2);
+				dstr2 = decompose_unichar(c, &dsize2,
+							  dhangul_2);
 			if (!decompose || !dstr2) {
 				c2 = c;
 				dstr2 = &c2;

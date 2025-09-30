@@ -1,18 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * snd_sst_tokens.h - Intel SST tokens definition
  *
  * Copyright (C) 2016 Intel Corp
  * Author: Shreyas NC <shreyas.nc@intel.com>
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 #ifndef __SND_SST_TOKENS_H__
 #define __SND_SST_TOKENS_H__
@@ -221,6 +212,19 @@
  * %SKL_TKN_MM_U32_NUM_IN_FMT:  Number of input formats
  * %SKL_TKN_MM_U32_NUM_OUT_FMT: Number of output formats
  *
+ * %SKL_TKN_U32_ASTATE_IDX:     Table Index for the A-State entry to be filled
+ *                              with kcps and clock source
+ *
+ * %SKL_TKN_U32_ASTATE_COUNT:   Number of valid entries in A-State table
+ *
+ * %SKL_TKN_U32_ASTATE_KCPS:    Specifies the core load threshold (in kilo
+ *                              cycles per second) below which DSP is clocked
+ *                              from source specified by clock source.
+ *
+ * %SKL_TKN_U32_ASTATE_CLK_SRC: Clock source for A-State entry
+ *
+ * %SKL_TKN_U32_FMT_CFG_IDX:    Format config index
+ *
  * module_id and loadable flags dont have tokens as these values will be
  * read from the DSP FW manifest
  *
@@ -308,7 +312,13 @@ enum SKL_TKNS {
 	SKL_TKN_MM_U32_NUM_IN_FMT,
 	SKL_TKN_MM_U32_NUM_OUT_FMT,
 
-	SKL_TKN_MAX = SKL_TKN_MM_U32_NUM_OUT_FMT,
+	SKL_TKN_U32_ASTATE_IDX,
+	SKL_TKN_U32_ASTATE_COUNT,
+	SKL_TKN_U32_ASTATE_KCPS,
+	SKL_TKN_U32_ASTATE_CLK_SRC,
+
+	SKL_TKN_U32_FMT_CFG_IDX = 96,
+	SKL_TKN_MAX = SKL_TKN_U32_FMT_CFG_IDX,
 };
 
 #endif

@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for Linear Technology LTC2471 and LTC2473 voltage monitors
  * The LTC2473 is identical to the 2471, but reports a differential signal.
  *
  * Copyright (C) 2017 Topic Embedded Products
  * Author: Mike Looijmans <mike.looijmans@topic.nl>
- *
- * License: GPLv2
  */
 
 #include <linux/err.h>
@@ -98,12 +97,11 @@ static const struct iio_chan_spec ltc2473_channel[] = {
 
 static const struct iio_info ltc2471_info = {
 	.read_raw = ltc2471_read_raw,
-	.driver_module = THIS_MODULE,
 };
 
-static int ltc2471_i2c_probe(struct i2c_client *client,
-			     const struct i2c_device_id *id)
+static int ltc2471_i2c_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct iio_dev *indio_dev;
 	struct ltc2471_data *data;
 	int ret;
@@ -118,7 +116,6 @@ static int ltc2471_i2c_probe(struct i2c_client *client,
 	data = iio_priv(indio_dev);
 	data->client = client;
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->name = id->name;
 	indio_dev->info = &ltc2471_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -141,7 +138,7 @@ static int ltc2471_i2c_probe(struct i2c_client *client,
 static const struct i2c_device_id ltc2471_i2c_id[] = {
 	{ "ltc2471", ltc2471 },
 	{ "ltc2473", ltc2473 },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc2471_i2c_id);
 
@@ -149,7 +146,7 @@ static struct i2c_driver ltc2471_i2c_driver = {
 	.driver = {
 		.name = "ltc2471",
 	},
-	.probe    = ltc2471_i2c_probe,
+	.probe = ltc2471_i2c_probe,
 	.id_table = ltc2471_i2c_id,
 };
 

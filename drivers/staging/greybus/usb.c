@@ -1,19 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * USB host driver for the Greybus "generic" USB module.
  *
  * Copyright 2014 Google Inc.
  * Copyright 2014 Linaro Ltd.
- *
- * Released under the GPLv2 only.
- *
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
+#include <linux/greybus.h>
 
-#include "greybus.h"
 #include "gbphy.h"
 
 /* Greybus USB request types */
@@ -29,7 +27,7 @@ struct gb_usb_hub_control_request {
 };
 
 struct gb_usb_hub_control_response {
-	u8 buf[0];
+	DECLARE_FLEX_ARRAY(u8, buf);
 };
 
 struct gb_usb_device {
@@ -244,4 +242,5 @@ static struct gbphy_driver usb_driver = {
 };
 
 module_gbphy_driver(usb_driver);
+MODULE_DESCRIPTION("USB host driver for the Greybus 'generic' USB module");
 MODULE_LICENSE("GPL v2");

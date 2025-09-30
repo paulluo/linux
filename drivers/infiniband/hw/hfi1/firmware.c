@@ -1,53 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2017 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #include <linux/firmware.h>
 #include <linux/mutex.h>
-#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/crc32.h>
 
@@ -68,7 +25,11 @@
 #define ALT_FW_FABRIC_NAME "hfi1_fabric_d.fw"
 #define ALT_FW_SBUS_NAME "hfi1_sbus_d.fw"
 #define ALT_FW_PCIE_NAME "hfi1_pcie_d.fw"
-#define HOST_INTERFACE_VERSION 1
+
+MODULE_FIRMWARE(DEFAULT_FW_8051_NAME_ASIC);
+MODULE_FIRMWARE(DEFAULT_FW_FABRIC_NAME);
+MODULE_FIRMWARE(DEFAULT_FW_SBUS_NAME);
+MODULE_FIRMWARE(DEFAULT_FW_PCIE_NAME);
 
 static uint fw_8051_load = 1;
 static uint fw_fabric_serdes_load = 1;
@@ -112,6 +73,12 @@ struct css_header {
 #define KEY_SIZE      256
 #define MU_SIZE		8
 #define EXPONENT_SIZE	4
+
+/* size of platform configuration partition */
+#define MAX_PLATFORM_CONFIG_FILE_SIZE 4096
+
+/* size of file of plaform configuration encoded in format version 4 */
+#define PLATFORM_CONFIG_FORMAT_4_FILE_SIZE 528
 
 /* the file itself */
 struct firmware_file {
@@ -1147,7 +1114,7 @@ static void turn_off_spicos(struct hfi1_devdata *dd, int flags)
  * Reset all of the fabric serdes for this HFI in preparation to take the
  * link to Polling.
  *
- * To do a reset, we need to write to to the serdes registers.  Unfortunately,
+ * To do a reset, we need to write to the serdes registers.  Unfortunately,
  * the fabric serdes download to the other HFI on the ASIC will have turned
  * off the firmware validation on this HFI.  This means we can't write to the
  * registers to reset the serdes.  Work around this by performing a complete
@@ -1387,7 +1354,14 @@ int acquire_hw_mutex(struct hfi1_devdata *dd)
 	unsigned long timeout;
 	int try = 0;
 	u8 mask = 1 << dd->hfi1_id;
-	u8 user;
+	u8 user = (u8)read_csr(dd, ASIC_CFG_MUTEX);
+
+	if (user == mask) {
+		dd_dev_info(dd,
+			    "Hardware mutex already acquired, mutex mask %u\n",
+			    (u32)mask);
+		return 0;
+	}
 
 retry:
 	timeout = msecs_to_jiffies(HM_TIMEOUT) + jiffies;
@@ -1418,7 +1392,15 @@ retry:
 
 void release_hw_mutex(struct hfi1_devdata *dd)
 {
-	write_csr(dd, ASIC_CFG_MUTEX, 0);
+	u8 mask = 1 << dd->hfi1_id;
+	u8 user = (u8)read_csr(dd, ASIC_CFG_MUTEX);
+
+	if (user != mask)
+		dd_dev_warn(dd,
+			    "Unable to release hardware mutex, mutex mask %u, my mask %u\n",
+			    (u32)user, (u32)mask);
+	else
+		write_csr(dd, ASIC_CFG_MUTEX, 0);
 }
 
 /* return the given resource bit(s) as a mask for the given HFI */
@@ -1733,7 +1715,7 @@ static int check_meta_version(struct hfi1_devdata *dd, u32 *system_table)
 	ver_start /= 8;
 	meta_ver = *((u8 *)system_table + ver_start) & ((1 << ver_len) - 1);
 
-	if (meta_ver < 5) {
+	if (meta_ver < 4) {
 		dd_dev_info(
 			dd, "%s:Please update platform config\n", __func__);
 		return -EINVAL;
@@ -1761,6 +1743,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 
 	if (!dd->platform_config.data) {
 		dd_dev_err(dd, "%s: Missing config file\n", __func__);
+		ret = -EINVAL;
 		goto bail;
 	}
 	ptr = (u32 *)dd->platform_config.data;
@@ -1769,16 +1752,31 @@ int parse_platform_config(struct hfi1_devdata *dd)
 	ptr++;
 	if (magic_num != PLATFORM_CONFIG_MAGIC_NUM) {
 		dd_dev_err(dd, "%s: Bad config file\n", __func__);
+		ret = -EINVAL;
 		goto bail;
 	}
 
 	/* Field is file size in DWORDs */
 	file_length = (*ptr) * 4;
-	ptr++;
+
+	/*
+	 * Length can't be larger than partition size. Assume platform
+	 * config format version 4 is being used. Interpret the file size
+	 * field as header instead by not moving the pointer.
+	 */
+	if (file_length > MAX_PLATFORM_CONFIG_FILE_SIZE) {
+		dd_dev_info(dd,
+			    "%s:File length out of bounds, using alternative format\n",
+			    __func__);
+		file_length = PLATFORM_CONFIG_FORMAT_4_FILE_SIZE;
+	} else {
+		ptr++;
+	}
 
 	if (file_length > dd->platform_config.size) {
 		dd_dev_info(dd, "%s:File claims to be larger than read size\n",
 			    __func__);
+		ret = -EINVAL;
 		goto bail;
 	} else if (file_length < dd->platform_config.size) {
 		dd_dev_info(dd,
@@ -1789,7 +1787,8 @@ int parse_platform_config(struct hfi1_devdata *dd)
 
 	/*
 	 * In both cases where we proceed, using the self-reported file length
-	 * is the safer option
+	 * is the safer option. In case of old format a predefined value is
+	 * being used.
 	 */
 	while (ptr < (u32 *)(dd->platform_config.data + file_length)) {
 		header1 = *ptr;
@@ -1798,6 +1797,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			dd_dev_err(dd, "%s: Failed validation at offset %ld\n",
 				   __func__, (ptr - (u32 *)
 					      dd->platform_config.data));
+			ret = -EINVAL;
 			goto bail;
 		}
 
@@ -1829,11 +1829,8 @@ int parse_platform_config(struct hfi1_devdata *dd)
 									2;
 				break;
 			case PLATFORM_CONFIG_RX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_TX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 				pcfgcache->config_tables[table_type].num_table =
 							table_length_dwords;
@@ -1844,6 +1841,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 					   __func__, table_type,
 					   (ptr - (u32 *)
 					    dd->platform_config.data));
+				ret = -EINVAL;
 				goto bail; /* We don't trust this file now */
 			}
 			pcfgcache->config_tables[table_type].table = ptr;
@@ -1851,15 +1849,10 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			/* metadata table */
 			switch (table_type) {
 			case PLATFORM_CONFIG_SYSTEM_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_PORT_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_RX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_TX_PRESET_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-				/* fall through */
 			case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 				break;
 			default:
@@ -1868,6 +1861,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 					   __func__, table_type,
 					   (ptr -
 					    (u32 *)dd->platform_config.data));
+				ret = -EINVAL;
 				goto bail; /* We don't trust this file now */
 			}
 			pcfgcache->config_tables[table_type].table_metadata =
@@ -1885,6 +1879,7 @@ int parse_platform_config(struct hfi1_devdata *dd)
 			dd_dev_err(dd, "%s: Failed CRC check at offset %ld\n",
 				   __func__, (ptr -
 				   (u32 *)dd->platform_config.data));
+			ret = -EINVAL;
 			goto bail;
 		}
 		/* Jump the CRC DWORD */
@@ -1988,15 +1983,10 @@ static int get_platform_fw_field_metadata(struct hfi1_devdata *dd, int table,
 
 	switch (table) {
 	case PLATFORM_CONFIG_SYSTEM_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_PORT_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_RX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_TX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 		if (field && field < platform_config_table_limits[table])
 			src_ptr =
@@ -2099,11 +2089,8 @@ int get_platform_config_field(struct hfi1_devdata *dd,
 			pcfgcache->config_tables[table_type].table;
 		break;
 	case PLATFORM_CONFIG_RX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_TX_PRESET_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_QSFP_ATTEN_TABLE:
-		/* fall through */
 	case PLATFORM_CONFIG_VARIABLE_SETTINGS_TABLE:
 		src_ptr = pcfgcache->config_tables[table_type].table;
 

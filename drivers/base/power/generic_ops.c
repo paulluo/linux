@@ -1,15 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * drivers/base/power/generic_ops.c - Generic PM callbacks for subsystems
  *
  * Copyright (c) 2010 Rafael J. Wysocki <rjw@sisk.pl>, Novell Inc.
- *
- * This file is released under the GPLv2.
  */
-
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/export.h>
-#include <linux/suspend.h>
 
 #ifdef CONFIG_PM
 /**
@@ -118,18 +115,6 @@ int pm_generic_freeze_noirq(struct device *dev)
 EXPORT_SYMBOL_GPL(pm_generic_freeze_noirq);
 
 /**
- * pm_generic_freeze_late - Generic freeze_late callback for subsystems.
- * @dev: Device to freeze.
- */
-int pm_generic_freeze_late(struct device *dev)
-{
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-
-	return pm && pm->freeze_late ? pm->freeze_late(dev) : 0;
-}
-EXPORT_SYMBOL_GPL(pm_generic_freeze_late);
-
-/**
  * pm_generic_freeze - Generic freeze callback for subsystems.
  * @dev: Device to freeze.
  */
@@ -188,18 +173,6 @@ int pm_generic_thaw_noirq(struct device *dev)
 	return pm && pm->thaw_noirq ? pm->thaw_noirq(dev) : 0;
 }
 EXPORT_SYMBOL_GPL(pm_generic_thaw_noirq);
-
-/**
- * pm_generic_thaw_early - Generic thaw_early callback for subsystems.
- * @dev: Device to thaw.
- */
-int pm_generic_thaw_early(struct device *dev)
-{
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-
-	return pm && pm->thaw_early ? pm->thaw_early(dev) : 0;
-}
-EXPORT_SYMBOL_GPL(pm_generic_thaw_early);
 
 /**
  * pm_generic_thaw - Generic thaw callback for subsystems.
@@ -298,26 +271,4 @@ void pm_generic_complete(struct device *dev)
 	if (drv && drv->pm && drv->pm->complete)
 		drv->pm->complete(dev);
 }
-
-/**
- * pm_complete_with_resume_check - Complete a device power transition.
- * @dev: Device to handle.
- *
- * Complete a device power transition during a system-wide power transition and
- * optionally schedule a runtime resume of the device if the system resume in
- * progress has been initated by the platform firmware and the device had its
- * power.direct_complete flag set.
- */
-void pm_complete_with_resume_check(struct device *dev)
-{
-	pm_generic_complete(dev);
-	/*
-	 * If the device had been runtime-suspended before the system went into
-	 * the sleep state it is going out of and it has never been resumed till
-	 * now, resume it in case the firmware powered it up.
-	 */
-	if (dev->power.direct_complete && pm_resume_via_firmware())
-		pm_request_resume(dev);
-}
-EXPORT_SYMBOL_GPL(pm_complete_with_resume_check);
 #endif /* CONFIG_PM_SLEEP */

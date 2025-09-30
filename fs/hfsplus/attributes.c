@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/fs/hfsplus/attributes.c
  *
@@ -138,7 +139,7 @@ int hfsplus_find_attr(struct super_block *sb, u32 cnid,
 {
 	int err = 0;
 
-	hfs_dbg(ATTR_MOD, "find_attr: %s,%d\n", name ? name : NULL, cnid);
+	hfs_dbg("name %s, cnid %d\n", name ? name : NULL, cnid);
 
 	if (!HFSPLUS_SB(sb)->attr_tree) {
 		pr_err("attributes file doesn't exist\n");
@@ -200,7 +201,7 @@ int hfsplus_create_attr(struct inode *inode,
 	int entry_size;
 	int err;
 
-	hfs_dbg(ATTR_MOD, "create_attr: %s,%ld\n",
+	hfs_dbg("name %s, ino %ld\n",
 		name ? name : NULL, inode->i_ino);
 
 	if (!HFSPLUS_SB(sb)->attr_tree) {
@@ -215,6 +216,11 @@ int hfsplus_create_attr(struct inode *inode,
 	err = hfs_find_init(HFSPLUS_SB(sb)->attr_tree, &fd);
 	if (err)
 		goto failed_init_create_attr;
+
+	/* Fail early and avoid ENOSPC during the btree operation */
+	err = hfs_bmap_reserve(fd.tree, fd.tree->depth + 1);
+	if (err)
+		goto failed_create_attr;
 
 	if (name) {
 		err = hfsplus_attr_build_key(sb, fd.search_key,
@@ -286,6 +292,10 @@ static int __hfsplus_delete_attr(struct inode *inode, u32 cnid,
 		return -ENOENT;
 	}
 
+	/* Avoid btree corruption */
+	hfs_bnode_read(fd->bnode, fd->search_key,
+			fd->keyoffset, fd->keylength);
+
 	err = hfs_brec_remove(fd);
 	if (err)
 		return err;
@@ -300,7 +310,7 @@ int hfsplus_delete_attr(struct inode *inode, const char *name)
 	struct super_block *sb = inode->i_sb;
 	struct hfs_find_data fd;
 
-	hfs_dbg(ATTR_MOD, "delete_attr: %s,%ld\n",
+	hfs_dbg("name %s, ino %ld\n",
 		name ? name : NULL, inode->i_ino);
 
 	if (!HFSPLUS_SB(sb)->attr_tree) {
@@ -311,6 +321,11 @@ int hfsplus_delete_attr(struct inode *inode, const char *name)
 	err = hfs_find_init(HFSPLUS_SB(sb)->attr_tree, &fd);
 	if (err)
 		return err;
+
+	/* Fail early and avoid ENOSPC during the btree operation */
+	err = hfs_bmap_reserve(fd.tree, fd.tree->depth);
+	if (err)
+		goto out;
 
 	if (name) {
 		err = hfsplus_attr_build_key(sb, fd.search_key,
@@ -341,7 +356,7 @@ int hfsplus_delete_all_attrs(struct inode *dir, u32 cnid)
 	int err = 0;
 	struct hfs_find_data fd;
 
-	hfs_dbg(ATTR_MOD, "delete_all_attrs: %d\n", cnid);
+	hfs_dbg("cnid %d\n", cnid);
 
 	if (!HFSPLUS_SB(dir->i_sb)->attr_tree) {
 		pr_err("attributes file doesn't exist\n");

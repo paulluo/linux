@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* interrupt handling
     Copyright (C) 2003-2004  Kevin Thayer <nufan_wfk at yahoo.com>
     Copyright (C) 2004  Chris Kennedy <c@groovy.org>
     Copyright (C) 2005-2007  Hans Verkuil <hverkuil@xs4all.nl>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "ivtv-driver.h"
@@ -544,7 +532,7 @@ static void ivtv_irq_dma_read(struct ivtv *itv)
 
 	IVTV_DEBUG_HI_IRQ("DEC DMA READ\n");
 
-	del_timer(&itv->dma_timer);
+	timer_delete(&itv->dma_timer);
 
 	if (!test_bit(IVTV_F_I_UDMA, &itv->i_flags) && itv->cur_dma_stream < 0)
 		return;
@@ -609,7 +597,7 @@ static void ivtv_irq_enc_dma_complete(struct ivtv *itv)
 	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, 2, data);
 	IVTV_DEBUG_HI_IRQ("ENC DMA COMPLETE %x %d (%d)\n", data[0], data[1], itv->cur_dma_stream);
 
-	del_timer(&itv->dma_timer);
+	timer_delete(&itv->dma_timer);
 
 	if (itv->cur_dma_stream < 0)
 		return;
@@ -682,7 +670,7 @@ static void ivtv_irq_dma_err(struct ivtv *itv)
 	u32 data[CX2341X_MBOX_MAX_DATA];
 	u32 status;
 
-	del_timer(&itv->dma_timer);
+	timer_delete(&itv->dma_timer);
 
 	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, 2, data);
 	status = read_reg(IVTV_REG_DMASTATUS);
@@ -1074,9 +1062,9 @@ irqreturn_t ivtv_irq_handler(int irq, void *dev_id)
 	return vsync_force ? IRQ_NONE : IRQ_HANDLED;
 }
 
-void ivtv_unfinished_dma(unsigned long arg)
+void ivtv_unfinished_dma(struct timer_list *t)
 {
-	struct ivtv *itv = (struct ivtv *)arg;
+	struct ivtv *itv = timer_container_of(itv, t, dma_timer);
 
 	if (!test_bit(IVTV_F_I_DMA, &itv->i_flags))
 		return;

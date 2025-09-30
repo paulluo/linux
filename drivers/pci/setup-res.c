@@ -1,17 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *	drivers/pci/setup-res.c
+ * Support routines for initializing a PCI subsystem
  *
  * Extruded from code written by
  *      Dave Rusling (david.rusling@reo.mts.dec.com)
  *      David Mosberger (davidm@cs.arizona.edu)
  *	David Miller (davem@redhat.com)
  *
- * Support routines for initializing a PCI subsystem.
- */
-
-/* fixed for multiple pci buses, 1999 Andrea Arcangeli <andrea@suse.de> */
-
-/*
+ * Fixed for multiple PCI buses, 1999 Andrea Arcangeli <andrea@suse.de>
+ *
  * Nov 2000, Ivan Kokshaysky <ink@jurassic.park.msu.ru>
  *	     Resource sorting
  */
@@ -32,7 +29,8 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 	u16 cmd;
 	u32 new, check, mask;
 	int reg;
-	struct resource *res = dev->resource + resno;
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
 
 	/* Per SR-IOV spec 3.4.1.11, VF BARs are RO zero */
 	if (dev->is_virtfn)
@@ -76,13 +74,18 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 		/*
 		 * Apparently some Matrox devices have ROM BARs that read
 		 * as zero when disabled, so don't update ROM BARs unless
-		 * they're enabled.  See https://lkml.org/lkml/2005/8/30/138.
+		 * they're enabled.  See
+		 * https://lore.kernel.org/r/43147B3D.1030309@vc.cvut.cz/
+		 * But we must update ROM BAR for buggy devices where even a
+		 * disabled ROM can conflict with other BARs.
 		 */
-		if (!(res->flags & IORESOURCE_ROM_ENABLE))
+		if (!(res->flags & IORESOURCE_ROM_ENABLE) &&
+		    !dev->rom_bar_overlap)
 			return;
 
 		reg = dev->rom_base_reg;
-		new |= PCI_ROM_ADDRESS_ENABLE;
+		if (res->flags & IORESOURCE_ROM_ENABLE)
+			new |= PCI_ROM_ADDRESS_ENABLE;
 	} else
 		return;
 
@@ -102,8 +105,8 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 	pci_read_config_dword(dev, reg, &check);
 
 	if ((new ^ check) & mask) {
-		dev_err(&dev->dev, "BAR %d: error updating (%#08x != %#08x)\n",
-			resno, new, check);
+		pci_err(dev, "%s: error updating (%#010x != %#010x)\n",
+			res_name, new, check);
 	}
 
 	if (res->flags & IORESOURCE_MEM_64) {
@@ -111,8 +114,8 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 		pci_write_config_dword(dev, reg + 4, new);
 		pci_read_config_dword(dev, reg + 4, &check);
 		if (check != new) {
-			dev_err(&dev->dev, "BAR %d: error updating (high %#08x != %#08x)\n",
-				resno, new, check);
+			pci_err(dev, "%s: error updating (high %#010x != %#010x)\n",
+				res_name, new, check);
 		}
 	}
 
@@ -124,20 +127,19 @@ void pci_update_resource(struct pci_dev *dev, int resno)
 {
 	if (resno <= PCI_ROM_RESOURCE)
 		pci_std_update_resource(dev, resno);
-#ifdef CONFIG_PCI_IOV
-	else if (resno >= PCI_IOV_RESOURCES && resno <= PCI_IOV_RESOURCE_END)
+	else if (pci_resource_is_iov(resno))
 		pci_iov_update_resource(dev, resno);
-#endif
 }
 
 int pci_claim_resource(struct pci_dev *dev, int resource)
 {
 	struct resource *res = &dev->resource[resource];
+	const char *res_name = pci_resource_name(dev, resource);
 	struct resource *root, *conflict;
 
 	if (res->flags & IORESOURCE_UNSET) {
-		dev_info(&dev->dev, "can't claim BAR %d %pR: no address assigned\n",
-			 resource, res);
+		pci_info(dev, "%s %pR: can't claim; no address assigned\n",
+			 res_name, res);
 		return -EINVAL;
 	}
 
@@ -151,16 +153,16 @@ int pci_claim_resource(struct pci_dev *dev, int resource)
 
 	root = pci_find_parent_resource(dev, res);
 	if (!root) {
-		dev_info(&dev->dev, "can't claim BAR %d %pR: no compatible bridge window\n",
-			 resource, res);
+		pci_info(dev, "%s %pR: can't claim; no compatible bridge window\n",
+			 res_name, res);
 		res->flags |= IORESOURCE_UNSET;
 		return -EINVAL;
 	}
 
 	conflict = request_resource_conflict(root, res);
 	if (conflict) {
-		dev_info(&dev->dev, "can't claim BAR %d %pR: address conflict with %s %pR\n",
-			 resource, res, conflict->name, conflict);
+		pci_info(dev, "%s %pR: can't claim; address conflict with %s %pR\n",
+			 res_name, res, conflict->name, conflict);
 		res->flags |= IORESOURCE_UNSET;
 		return -EBUSY;
 	}
@@ -171,8 +173,6 @@ EXPORT_SYMBOL(pci_claim_resource);
 
 void pci_disable_bridge_window(struct pci_dev *dev)
 {
-	dev_info(&dev->dev, "disabling bridge mem windows\n");
-
 	/* MMIO Base/Limit */
 	pci_write_config_dword(dev, PCI_MEMORY_BASE, 0x0000fff0);
 
@@ -201,6 +201,7 @@ static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev,
 {
 	struct resource *root, *conflict;
 	resource_size_t fw_addr, start, end;
+	const char *res_name = pci_resource_name(dev, resno);
 
 	fw_addr = pcibios_retrieve_fw_addr(dev, resno);
 	if (!fw_addr)
@@ -208,24 +209,33 @@ static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev,
 
 	start = res->start;
 	end = res->end;
-	res->start = fw_addr;
-	res->end = res->start + size - 1;
+	resource_set_range(res, fw_addr, size);
 	res->flags &= ~IORESOURCE_UNSET;
 
 	root = pci_find_parent_resource(dev, res);
 	if (!root) {
+		/*
+		 * If dev is behind a bridge, accesses will only reach it
+		 * if res is inside the relevant bridge window.
+		 */
+		if (pci_upstream_bridge(dev))
+			return -ENXIO;
+
+		/*
+		 * On the root bus, assume the host bridge will forward
+		 * everything.
+		 */
 		if (res->flags & IORESOURCE_IO)
 			root = &ioport_resource;
 		else
 			root = &iomem_resource;
 	}
 
-	dev_info(&dev->dev, "BAR %d: trying firmware assignment %pR\n",
-		 resno, res);
+	pci_info(dev, "%s: trying firmware assignment %pR\n", res_name, res);
 	conflict = request_resource_conflict(root, res);
 	if (conflict) {
-		dev_info(&dev->dev, "BAR %d: %pR conflicts with %s %pR\n",
-			 resno, res, conflict->name, conflict);
+		pci_info(dev, "%s %pR: conflicts with %s %pR\n", res_name, res,
+			 conflict->name, conflict);
 		res->start = start;
 		res->end = end;
 		res->flags |= IORESOURCE_UNSET;
@@ -250,7 +260,7 @@ resource_size_t __weak pcibios_align_resource(void *data,
 static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
 		int resno, resource_size_t size, resource_size_t align)
 {
-	struct resource *res = dev->resource + resno;
+	struct resource *res = pci_resource_n(dev, resno);
 	resource_size_t min;
 	int ret;
 
@@ -313,7 +323,8 @@ static int _pci_assign_resource(struct pci_dev *dev, int resno,
 
 int pci_assign_resource(struct pci_dev *dev, int resno)
 {
-	struct resource *res = dev->resource + resno;
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
 	resource_size_t align, size;
 	int ret;
 
@@ -323,8 +334,8 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 	res->flags |= IORESOURCE_UNSET;
 	align = pci_resource_alignment(dev, res);
 	if (!align) {
-		dev_info(&dev->dev, "BAR %d: can't assign %pR (bogus alignment)\n",
-			 resno, res);
+		pci_info(dev, "%s %pR: can't assign; bogus alignment\n",
+			 res_name, res);
 		return -EINVAL;
 	}
 
@@ -337,19 +348,18 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 	 * working, which is better than just leaving it disabled.
 	 */
 	if (ret < 0) {
-		dev_info(&dev->dev, "BAR %d: no space for %pR\n", resno, res);
+		pci_info(dev, "%s %pR: can't assign; no space\n", res_name, res);
 		ret = pci_revert_fw_address(res, dev, resno, size);
 	}
 
 	if (ret < 0) {
-		dev_info(&dev->dev, "BAR %d: failed to assign %pR\n", resno,
-			 res);
+		pci_info(dev, "%s %pR: failed to assign\n", res_name, res);
 		return ret;
 	}
 
 	res->flags &= ~IORESOURCE_UNSET;
 	res->flags &= ~IORESOURCE_STARTALIGN;
-	dev_info(&dev->dev, "BAR %d: assigned %pR\n", resno, res);
+	pci_info(dev, "%s %pR: assigned\n", res_name, res);
 	if (resno < PCI_BRIDGE_RESOURCES)
 		pci_update_resource(dev, resno);
 
@@ -357,10 +367,11 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 }
 EXPORT_SYMBOL(pci_assign_resource);
 
-int pci_reassign_resource(struct pci_dev *dev, int resno, resource_size_t addsize,
-			resource_size_t min_align)
+int pci_reassign_resource(struct pci_dev *dev, int resno,
+			  resource_size_t addsize, resource_size_t min_align)
 {
-	struct resource *res = dev->resource + resno;
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
 	unsigned long flags;
 	resource_size_t new_size;
 	int ret;
@@ -371,61 +382,155 @@ int pci_reassign_resource(struct pci_dev *dev, int resno, resource_size_t addsiz
 	flags = res->flags;
 	res->flags |= IORESOURCE_UNSET;
 	if (!res->parent) {
-		dev_info(&dev->dev, "BAR %d: can't reassign an unassigned resource %pR\n",
-			 resno, res);
+		pci_info(dev, "%s %pR: can't reassign; unassigned resource\n",
+			 res_name, res);
 		return -EINVAL;
 	}
 
-	/* already aligned with min_align */
 	new_size = resource_size(res) + addsize;
 	ret = _pci_assign_resource(dev, resno, new_size, min_align);
 	if (ret) {
 		res->flags = flags;
-		dev_info(&dev->dev, "BAR %d: %pR (failed to expand by %#llx)\n",
-			 resno, res, (unsigned long long) addsize);
+		pci_info(dev, "%s %pR: failed to expand by %#llx\n",
+			 res_name, res, (unsigned long long) addsize);
 		return ret;
 	}
 
 	res->flags &= ~IORESOURCE_UNSET;
 	res->flags &= ~IORESOURCE_STARTALIGN;
-	dev_info(&dev->dev, "BAR %d: reassigned %pR (expanded by %#llx)\n",
-		 resno, res, (unsigned long long) addsize);
+	pci_info(dev, "%s %pR: reassigned; expanded by %#llx\n",
+		 res_name, res, (unsigned long long) addsize);
 	if (resno < PCI_BRIDGE_RESOURCES)
 		pci_update_resource(dev, resno);
 
 	return 0;
 }
 
+void pci_release_resource(struct pci_dev *dev, int resno)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
+
+	if (!res->parent)
+		return;
+
+	pci_info(dev, "%s %pR: releasing\n", res_name, res);
+
+	release_resource(res);
+	res->end = resource_size(res) - 1;
+	res->start = 0;
+	res->flags |= IORESOURCE_UNSET;
+}
+EXPORT_SYMBOL(pci_release_resource);
+
+static bool pci_resize_is_memory_decoding_enabled(struct pci_dev *dev,
+						  int resno)
+{
+	u16 cmd;
+
+	if (pci_resource_is_iov(resno))
+		return pci_iov_is_memory_decoding_enabled(dev);
+
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+
+	return cmd & PCI_COMMAND_MEMORY;
+}
+
+static void pci_resize_resource_set_size(struct pci_dev *dev, int resno,
+					 int size)
+{
+	resource_size_t res_size = pci_rebar_size_to_bytes(size);
+	struct resource *res = pci_resource_n(dev, resno);
+
+	if (!pci_resource_is_iov(resno)) {
+		resource_set_size(res, res_size);
+	} else {
+		resource_set_size(res, res_size * pci_sriov_get_totalvfs(dev));
+		pci_iov_resource_set_size(dev, resno, res_size);
+	}
+}
+
+int pci_resize_resource(struct pci_dev *dev, int resno, int size)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	struct pci_host_bridge *host;
+	int old, ret;
+	u32 sizes;
+
+	/* Check if we must preserve the firmware's resource assignment */
+	host = pci_find_host_bridge(dev->bus);
+	if (host->preserve_config)
+		return -ENOTSUPP;
+
+	/* Make sure the resource isn't assigned before resizing it. */
+	if (!(res->flags & IORESOURCE_UNSET))
+		return -EBUSY;
+
+	if (pci_resize_is_memory_decoding_enabled(dev, resno))
+		return -EBUSY;
+
+	sizes = pci_rebar_get_possible_sizes(dev, resno);
+	if (!sizes)
+		return -ENOTSUPP;
+
+	if (!(sizes & BIT(size)))
+		return -EINVAL;
+
+	old = pci_rebar_get_current_size(dev, resno);
+	if (old < 0)
+		return old;
+
+	ret = pci_rebar_set_size(dev, resno, size);
+	if (ret)
+		return ret;
+
+	pci_resize_resource_set_size(dev, resno, size);
+
+	/* Check if the new config works by trying to assign everything. */
+	if (dev->bus->self) {
+		ret = pci_reassign_bridge_resources(dev->bus->self, res->flags);
+		if (ret)
+			goto error_resize;
+	}
+	return 0;
+
+error_resize:
+	pci_rebar_set_size(dev, resno, old);
+	pci_resize_resource_set_size(dev, resno, old);
+	return ret;
+}
+EXPORT_SYMBOL(pci_resize_resource);
+
 int pci_enable_resources(struct pci_dev *dev, int mask)
 {
 	u16 cmd, old_cmd;
 	int i;
 	struct resource *r;
+	const char *r_name;
 
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	old_cmd = cmd;
 
-	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
+	pci_dev_for_each_resource(dev, r, i) {
 		if (!(mask & (1 << i)))
 			continue;
 
-		r = &dev->resource[i];
+		r_name = pci_resource_name(dev, i);
 
 		if (!(r->flags & (IORESOURCE_IO | IORESOURCE_MEM)))
 			continue;
-		if ((i == PCI_ROM_RESOURCE) &&
-				(!(r->flags & IORESOURCE_ROM_ENABLE)))
+		if (pci_resource_is_optional(dev, i))
 			continue;
 
 		if (r->flags & IORESOURCE_UNSET) {
-			dev_err(&dev->dev, "can't enable device: BAR %d %pR not assigned\n",
-				i, r);
+			pci_err(dev, "%s %pR: not assigned; can't enable device\n",
+				r_name, r);
 			return -EINVAL;
 		}
 
 		if (!r->parent) {
-			dev_err(&dev->dev, "can't enable device: BAR %d %pR not claimed\n",
-				i, r);
+			pci_err(dev, "%s %pR: not claimed; can't enable device\n",
+				r_name, r);
 			return -EINVAL;
 		}
 
@@ -436,8 +541,7 @@ int pci_enable_resources(struct pci_dev *dev, int mask)
 	}
 
 	if (cmd != old_cmd) {
-		dev_info(&dev->dev, "enabling device (%04x -> %04x)\n",
-			 old_cmd, cmd);
+		pci_info(dev, "enabling device (%04x -> %04x)\n", old_cmd, cmd);
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
 	return 0;

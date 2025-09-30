@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * include/asm/processor.h
  *
@@ -6,12 +7,6 @@
 
 #ifndef __ASM_SPARC64_PROCESSOR_H
 #define __ASM_SPARC64_PROCESSOR_H
-
-/*
- * Sparc64 implementation of macro that returns current
- * instruction pointer ("program counter").
- */
-#define current_text_addr() ({ void *pc; __asm__("rd %%pc, %0" : "=r" (pc)); pc; })
 
 #include <asm/asi.h>
 #include <asm/pstate.h>
@@ -51,10 +46,6 @@
 #endif
 
 #ifndef __ASSEMBLY__
-
-typedef struct {
-	unsigned char seg;
-} mm_segment_t;
 
 /* The Sparc processor specific thread struct. */
 /* XXX This should die, everything can go into thread_info now. */
@@ -185,10 +176,7 @@ do { \
 	regs->tstate &= ~TSTATE_PEF;	\
 } while (0)
 
-/* Free all resources held by a thread. */
-#define release_thread(tsk)		do { } while (0)
-
-unsigned long get_wchan(struct task_struct *task);
+unsigned long __get_wchan(struct task_struct *task);
 
 #define task_pt_regs(tsk) (task_thread_info(tsk)->kregs)
 #define KSTK_EIP(tsk)  (task_pt_regs(tsk)->tpc)
@@ -199,6 +187,13 @@ unsigned long get_wchan(struct task_struct *task);
  * To make a long story short, we are trying to yield the current cpu
  * strand during busy loops.
  */
+#ifdef	BUILD_VDSO
+#define	cpu_relax()	asm volatile("\n99:\n\t"			\
+				     "rd	%%ccr, %%g0\n\t"	\
+				     "rd	%%ccr, %%g0\n\t"	\
+				     "rd	%%ccr, %%g0\n\t"	\
+				     ::: "memory")
+#else /* ! BUILD_VDSO */
 #define cpu_relax()	asm volatile("\n99:\n\t"			\
 				     "rd	%%ccr, %%g0\n\t"	\
 				     "rd	%%ccr, %%g0\n\t"	\
@@ -210,6 +205,7 @@ unsigned long get_wchan(struct task_struct *task);
 				     "nop\n\t"				\
 				     ".previous"			\
 				     ::: "memory")
+#endif
 
 /* Prefetch support.  This is tuned for UltraSPARC-III and later.
  * UltraSPARC-I will treat these as nops, and UltraSPARC-II has
@@ -217,7 +213,6 @@ unsigned long get_wchan(struct task_struct *task);
  */
 #define ARCH_HAS_PREFETCH
 #define ARCH_HAS_PREFETCHW
-#define ARCH_HAS_SPINLOCK_PREFETCH
 
 static inline void prefetch(const void *x)
 {
@@ -242,8 +237,6 @@ static inline void prefetchw(const void *x)
 			     : /* no outputs */
 			     : "r" (x));
 }
-
-#define spin_lock_prefetch(x)	prefetchw(x)
 
 #define HAVE_ARCH_PICK_MMAP_LAYOUT
 

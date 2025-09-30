@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: tbutils - ACPI Table utilities
  *
+ * Copyright (C) 2000 - 2025, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -52,7 +18,6 @@ ACPI_MODULE_NAME("tbutils")
 static acpi_physical_address
 acpi_tb_get_root_table_entry(u8 *table_entry, u32 table_entry_size);
 
-#if (!ACPI_REDUCED_HARDWARE)
 /*******************************************************************************
  *
  * FUNCTION:    acpi_tb_initialize_facs
@@ -70,12 +35,7 @@ acpi_status acpi_tb_initialize_facs(void)
 {
 	struct acpi_table_facs *facs;
 
-	/* If Hardware Reduced flag is set, there is no FACS */
-
-	if (acpi_gbl_reduced_hardware) {
-		acpi_gbl_FACS = NULL;
-		return (AE_OK);
-	} else if (acpi_gbl_FADT.Xfacs &&
+	if (acpi_gbl_FADT.Xfacs &&
 		   (!acpi_gbl_FADT.facs
 		    || !acpi_gbl_use32_bit_facs_addresses)) {
 		(void)acpi_get_table_by_index(acpi_gbl_xfacs_index,
@@ -95,7 +55,6 @@ acpi_status acpi_tb_initialize_facs(void)
 
 	return (AE_OK);
 }
-#endif				/* !ACPI_REDUCED_HARDWARE */
 
 /*******************************************************************************
  *
@@ -199,6 +158,7 @@ struct acpi_table_header *acpi_tb_copy_dsdt(u32 table_index)
 static acpi_physical_address
 acpi_tb_get_root_table_entry(u8 *table_entry, u32 table_entry_size)
 {
+	u32 address32;
 	u64 address64;
 
 	/*
@@ -210,8 +170,8 @@ acpi_tb_get_root_table_entry(u8 *table_entry, u32 table_entry_size)
 		 * 32-bit platform, RSDT: Return 32-bit table entry
 		 * 64-bit platform, RSDT: Expand 32-bit to 64-bit and return
 		 */
-		return ((acpi_physical_address)
-			(*ACPI_CAST_PTR(u32, table_entry)));
+		ACPI_MOVE_32_TO_32(&address32, table_entry);
+		return address32;
 	} else {
 		/*
 		 * 32-bit platform, XSDT: Truncate 64-bit to 32-bit and return
@@ -333,7 +293,7 @@ acpi_tb_parse_root_table(acpi_physical_address rsdp_address)
 
 	/* Validate the root table checksum */
 
-	status = acpi_tb_verify_checksum(table, length);
+	status = acpi_ut_verify_checksum(table, length);
 	if (ACPI_FAILURE(status)) {
 		acpi_os_unmap_memory(table, length);
 		return_ACPI_STATUS(status);
@@ -362,13 +322,13 @@ acpi_tb_parse_root_table(acpi_physical_address rsdp_address)
 
 		status = acpi_tb_install_standard_table(address,
 							ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
-							FALSE, TRUE,
+							NULL, FALSE, TRUE,
 							&table_index);
 
 		if (ACPI_SUCCESS(status) &&
-		    ACPI_COMPARE_NAME(&acpi_gbl_root_table_list.
-				      tables[table_index].signature,
-				      ACPI_SIG_FADT)) {
+		    ACPI_COMPARE_NAMESEG(&acpi_gbl_root_table_list.
+					 tables[table_index].signature,
+					 ACPI_SIG_FADT)) {
 			acpi_gbl_fadt_index = table_index;
 			acpi_tb_parse_fadt();
 		}

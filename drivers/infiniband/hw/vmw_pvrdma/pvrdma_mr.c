@@ -104,12 +104,14 @@ struct ib_mr *pvrdma_get_dma_mr(struct ib_pd *pd, int acc)
  * @length: length of region
  * @virt_addr: I/O virtual address
  * @access_flags: access flags for memory region
+ * @dmah: dma handle
  * @udata: user data
  *
  * @return: ib_mr pointer on success, otherwise returns an errno.
  */
 struct ib_mr *pvrdma_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 				 u64 virt_addr, int access_flags,
+				 struct ib_dmah *dmah,
 				 struct ib_udata *udata)
 {
 	struct pvrdma_dev *dev = to_vdev(pd->device);
@@ -119,31 +121,27 @@ struct ib_mr *pvrdma_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	union pvrdma_cmd_resp rsp;
 	struct pvrdma_cmd_create_mr *cmd = &req.create_mr;
 	struct pvrdma_cmd_create_mr_resp *resp = &rsp.create_mr_resp;
-	int nchunks;
-	int ret;
-	int entry;
-	struct scatterlist *sg;
+	int ret, npages;
+
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
 
 	if (length == 0 || length > dev->dsr->caps.max_mr_size) {
 		dev_warn(&dev->pdev->dev, "invalid mem region length\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	umem = ib_umem_get(pd->uobject->context, start,
-			   length, access_flags, 0);
+	umem = ib_umem_get(pd->device, start, length, access_flags);
 	if (IS_ERR(umem)) {
 		dev_warn(&dev->pdev->dev,
 			 "could not get umem for mem region\n");
 		return ERR_CAST(umem);
 	}
 
-	nchunks = 0;
-	for_each_sg(umem->sg_head.sgl, sg, umem->nmap, entry)
-		nchunks += sg_dma_len(sg) >> PAGE_SHIFT;
-
-	if (nchunks < 0 || nchunks > PVRDMA_PAGE_DIR_MAX_PAGES) {
+	npages = ib_umem_num_dma_blocks(umem, PAGE_SIZE);
+	if (npages < 0 || npages > PVRDMA_PAGE_DIR_MAX_PAGES) {
 		dev_warn(&dev->pdev->dev, "overflow %d pages in mem region\n",
-			 nchunks);
+			 npages);
 		ret = -EINVAL;
 		goto err_umem;
 	}
@@ -158,7 +156,7 @@ struct ib_mr *pvrdma_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->mmr.size = length;
 	mr->umem = umem;
 
-	ret = pvrdma_page_dir_init(dev, &mr->pdir, nchunks, false);
+	ret = pvrdma_page_dir_init(dev, &mr->pdir, npages, false);
 	if (ret) {
 		dev_warn(&dev->pdev->dev,
 			 "could not allocate page directory\n");
@@ -175,7 +173,7 @@ struct ib_mr *pvrdma_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	cmd->length = length;
 	cmd->pd_handle = to_vpd(pd)->pd_handle;
 	cmd->access_flags = access_flags;
-	cmd->nchunks = nchunks;
+	cmd->nchunks = npages;
 	cmd->pdir_dma = mr->pdir.dir_dma;
 
 	ret = pvrdma_cmd_post(dev, &req, &rsp, PVRDMA_CMD_CREATE_MR_RESP);
@@ -277,10 +275,11 @@ freemr:
 /**
  * pvrdma_dereg_mr - deregister a memory region
  * @ibmr: memory region
+ * @udata: pointer to user data
  *
  * @return: 0 on success.
  */
-int pvrdma_dereg_mr(struct ib_mr *ibmr)
+int pvrdma_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 {
 	struct pvrdma_user_mr *mr = to_vmr(ibmr);
 	struct pvrdma_dev *dev = to_vdev(ibmr->device);
@@ -297,8 +296,7 @@ int pvrdma_dereg_mr(struct ib_mr *ibmr)
 			 "could not deregister mem region, error: %d\n", ret);
 
 	pvrdma_page_dir_cleanup(dev, &mr->pdir);
-	if (mr->umem)
-		ib_umem_release(mr->umem);
+	ib_umem_release(mr->umem);
 
 	kfree(mr->pages);
 	kfree(mr);

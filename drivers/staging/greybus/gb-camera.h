@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Greybus Camera protocol driver.
  *
  * Copyright 2015 Google Inc.
- *
- * Released under the GPLv2 only.
  */
 #ifndef __GB_CAMERA_H
 #define __GB_CAMERA_H
@@ -93,8 +92,8 @@ struct gb_camera_ops {
 			unsigned int *flags, struct gb_camera_stream *streams,
 			struct gb_camera_csi_params *csi_params);
 	int (*capture)(void *priv, u32 request_id,
-			unsigned int streams, unsigned int num_frames,
-			size_t settings_size, const void *settings);
+		       unsigned int streams, unsigned int num_frames,
+		       size_t settings_size, const void *settings);
 	int (*flush)(void *priv, u32 *request_id);
 };
 

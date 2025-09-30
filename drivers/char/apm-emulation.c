@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * bios-less APM driver for ARM Linux
  *  Jamey Hicks <jamey@crl.dec.com>
@@ -140,9 +141,6 @@ static struct apm_queue kapmd_queue;
 
 static DEFINE_MUTEX(state_lock);
 
-static const char driver_version[] = "1.13";	/* no spaces */
-
-
 
 /*
  * Compatibility cruft until the IPAQ people move over to the new
@@ -236,12 +234,12 @@ static ssize_t apm_read(struct file *fp, char __user *buf, size_t count, loff_t 
 	return ret;
 }
 
-static unsigned int apm_poll(struct file *fp, poll_table * wait)
+static __poll_t apm_poll(struct file *fp, poll_table * wait)
 {
 	struct apm_user *as = fp->private_data;
 
 	poll_wait(fp, &apm_waitqueue, wait);
-	return queue_empty(&as->queue) ? 0 : POLLIN | POLLRDNORM;
+	return queue_empty(&as->queue) ? 0 : EPOLLIN | EPOLLRDNORM;
 }
 
 /*
@@ -434,6 +432,8 @@ static struct miscdevice apm_device = {
  */
 static int proc_apm_show(struct seq_file *m, void *v)
 {
+	static const char driver_version[] = "1.13";	/* no spaces */
+
 	struct apm_power_info info;
 	char *units;
 
@@ -461,19 +461,6 @@ static int proc_apm_show(struct seq_file *m, void *v)
 
 	return 0;
 }
-
-static int proc_apm_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, proc_apm_show, NULL);
-}
-
-static const struct file_operations apm_proc_fops = {
-	.owner		= THIS_MODULE,
-	.open		= proc_apm_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
 #endif
 
 static int kapmd(void *arg)
@@ -556,7 +543,7 @@ static int apm_suspend_notifier(struct notifier_block *nb,
 		wake_up_interruptible(&apm_waitqueue);
 
 		/*
-		 * Wait for the the suspend_acks_pending variable to drop to
+		 * Wait for the suspend_acks_pending variable to drop to
 		 * zero, meaning everybody acked the suspend event (or the
 		 * process was killed.)
 		 *
@@ -657,7 +644,7 @@ static int __init apm_init(void)
 	wake_up_process(kapmd_tsk);
 
 #ifdef CONFIG_PROC_FS
-	proc_create("apm", 0, NULL, &apm_proc_fops);
+	proc_create_single("apm", 0, NULL, proc_apm_show);
 #endif
 
 	ret = misc_register(&apm_device);

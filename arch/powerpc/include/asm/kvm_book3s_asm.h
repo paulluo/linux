@@ -1,16 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
  * Copyright SUSE Linux Products GmbH 2009
  *
@@ -104,14 +93,11 @@ struct kvmppc_host_state {
 	u8 napping;
 
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
-	/*
-	 * hwthread_req/hwthread_state pair is used to pull sibling threads
-	 * out of guest on pre-ISAv3.0B CPUs where threads share MMU.
-	 */
 	u8 hwthread_req;
 	u8 hwthread_state;
 	u8 host_ipi;
-	u8 ptid;
+	u8 ptid;		/* thread number within subcore when split */
+	u8 fake_suspend;
 	struct kvm_vcpu *kvm_vcpu;
 	struct kvmppc_vcore *kvm_vcore;
 	void __iomem *xics_phys;

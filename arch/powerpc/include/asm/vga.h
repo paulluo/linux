@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_VGA_H_
 #define _ASM_POWERPC_VGA_H_
 
@@ -38,11 +39,6 @@ static inline void scr_memsetw(u16 *s, u16 v, unsigned int n)
 {
 	memset16(s, cpu_to_le16(v), n / 2);
 }
-
-#define VT_BUF_HAVE_MEMCPYW
-#define VT_BUF_HAVE_MEMMOVEW
-#define scr_memcpyw	memcpy
-#define scr_memmovew	memmove
 
 #endif /* !CONFIG_VGA_CONSOLE && !CONFIG_MDA_CONSOLE */
 

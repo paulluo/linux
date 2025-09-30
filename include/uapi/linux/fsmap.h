@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * FS_IOC_GETFSMAP ioctl infrastructure.
  *
@@ -68,7 +69,7 @@ struct fsmap_head {
 };
 
 /* Size of an fsmap_head with room for nr records. */
-static inline size_t
+static inline __kernel_size_t
 fsmap_sizeof(
 	unsigned int	nr)
 {

@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_NCSI_H
 #define __NET_NCSI_H
+
+#include <linux/types.h>
 
 /*
  * The NCSI device states seen from external. More NCSI device states are

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * g762 - Driver for the Global Mixed-mode Technology Inc. fan speed
  *        PWM controller chips from G762 family, i.e. G762 and G763
@@ -24,20 +25,6 @@
  *
  * g762: minimal datasheet available at:
  *       http://www.gmt.com.tw/product/datasheet/EDS-762_3.pdf
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation.
  */
 
 #include <linux/device.h>
@@ -52,14 +39,14 @@
 #include <linux/kernel.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_data/g762.h>
 
 #define DRVNAME "g762"
 
 static const struct i2c_device_id g762_id[] = {
-	{ "g762", 0 },
-	{ "g763", 0 },
+	{ "g761" },
+	{ "g762" },
+	{ "g763" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, g762_id);
@@ -83,6 +70,7 @@ enum g762_regs {
 #define G762_REG_FAN_CMD1_PWM_POLARITY  0x02 /* PWM polarity */
 #define G762_REG_FAN_CMD1_PULSE_PER_REV 0x01 /* pulse per fan revolution */
 
+#define G761_REG_FAN_CMD2_FAN_CLOCK     0x20 /* choose internal clock*/
 #define G762_REG_FAN_CMD2_GEAR_MODE_1   0x08 /* fan gear mode */
 #define G762_REG_FAN_CMD2_GEAR_MODE_0   0x04
 #define G762_REG_FAN_CMD2_FAN_STARTV_1  0x02 /* fan startup voltage */
@@ -128,8 +116,8 @@ enum g762_regs {
 			 G762_REG_FAN_CMD2_GEAR_MODE_1)) >> 2))
 
 struct g762_data {
-	struct device *hwmon_dev;
 	struct i2c_client *client;
+	bool internal_clock;
 	struct clk *clk;
 
 	/* update mutex */
@@ -581,6 +569,7 @@ static int do_set_fan_startv(struct device *dev, unsigned long val)
 
 #ifdef CONFIG_OF
 static const struct of_device_id g762_dt_match[] = {
+	{ .compatible = "gmt,g761" },
 	{ .compatible = "gmt,g762" },
 	{ .compatible = "gmt,g763" },
 	{ },
@@ -594,6 +583,14 @@ MODULE_DEVICE_TABLE(of, g762_dt_match);
  * call to g762_of_clock_disable(). Note that a reference to clock is kept
  * in our private data structure to be used in this function.
  */
+static void g762_of_clock_disable(void *data)
+{
+	struct g762_data *g762 = data;
+
+	clk_disable_unprepare(g762->clk);
+	clk_put(g762->clk);
+}
+
 static int g762_of_clock_enable(struct i2c_client *client)
 {
 	struct g762_data *data;
@@ -603,6 +600,21 @@ static int g762_of_clock_enable(struct i2c_client *client)
 
 	if (!client->dev.of_node)
 		return 0;
+
+	data = i2c_get_clientdata(client);
+
+	/*
+	 * Skip CLK detection and handling if we use internal clock.
+	 * This is only valid for g761.
+	 */
+	data->internal_clock = of_device_is_compatible(client->dev.of_node,
+						       "gmt,g761") &&
+			       !of_property_present(client->dev.of_node,
+						    "clocks");
+	if (data->internal_clock) {
+		do_set_clk_freq(&client->dev, 32768);
+		return 0;
+	}
 
 	clk = of_clk_get(client->dev.of_node, 0);
 	if (IS_ERR(clk)) {
@@ -623,8 +635,13 @@ static int g762_of_clock_enable(struct i2c_client *client)
 		goto clk_unprep;
 	}
 
-	data = i2c_get_clientdata(client);
 	data->clk = clk;
+
+	ret = devm_add_action(&client->dev, g762_of_clock_disable, data);
+	if (ret) {
+		dev_err(&client->dev, "failed to add disable clock action\n");
+		goto clk_unprep;
+	}
 
 	return 0;
 
@@ -635,17 +652,6 @@ static int g762_of_clock_enable(struct i2c_client *client)
 	clk_put(clk);
 
 	return ret;
-}
-
-static void g762_of_clock_disable(struct i2c_client *client)
-{
-	struct g762_data *data = i2c_get_clientdata(client);
-
-	if (!data->clk)
-		return;
-
-	clk_disable_unprepare(data->clk);
-	clk_put(data->clk);
 }
 
 static int g762_of_prop_import_one(struct i2c_client *client,
@@ -698,8 +704,6 @@ static int g762_of_clock_enable(struct i2c_client *client)
 {
 	return 0;
 }
-
-static void g762_of_clock_disable(struct i2c_client *client) { }
 #endif
 
 /*
@@ -1039,21 +1043,32 @@ ATTRIBUTE_GROUPS(g762);
 static inline int g762_fan_init(struct device *dev)
 {
 	struct g762_data *data = g762_update_client(dev);
+	int ret;
 
 	if (IS_ERR(data))
 		return PTR_ERR(data);
+
+	/* internal_clock can only be set with compatible g761 */
+	if (data->internal_clock)
+		data->fan_cmd2 |= G761_REG_FAN_CMD2_FAN_CLOCK;
 
 	data->fan_cmd1 |= G762_REG_FAN_CMD1_DET_FAN_FAIL;
 	data->fan_cmd1 |= G762_REG_FAN_CMD1_DET_FAN_OOC;
 	data->valid = false;
 
-	return i2c_smbus_write_byte_data(data->client, G762_REG_FAN_CMD1,
-					 data->fan_cmd1);
+	ret = i2c_smbus_write_byte_data(data->client, G762_REG_FAN_CMD1,
+					data->fan_cmd1);
+	if (ret)
+		return ret;
+
+	return i2c_smbus_write_byte_data(data->client, G762_REG_FAN_CMD2,
+					 data->fan_cmd2);
 }
 
-static int g762_probe(struct i2c_client *client, const struct i2c_device_id *id)
+static int g762_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
+	struct device *hwmon_dev;
 	struct g762_data *data;
 	int ret;
 
@@ -1069,46 +1084,27 @@ static int g762_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	data->client = client;
 	mutex_init(&data->update_lock);
 
+	/* Get configuration via DT ... */
+	ret = g762_of_clock_enable(client);
+	if (ret)
+		return ret;
+
 	/* Enable fan failure detection and fan out of control protection */
 	ret = g762_fan_init(dev);
 	if (ret)
 		return ret;
 
-	/* Get configuration via DT ... */
-	ret = g762_of_clock_enable(client);
-	if (ret)
-		return ret;
 	ret = g762_of_prop_import(client);
 	if (ret)
-		goto clock_dis;
+		return ret;
 	/* ... or platform_data */
 	ret = g762_pdata_prop_import(client);
 	if (ret)
-		goto clock_dis;
+		return ret;
 
-	data->hwmon_dev = hwmon_device_register_with_groups(dev, client->name,
+	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
 							    data, g762_groups);
-	if (IS_ERR(data->hwmon_dev)) {
-		ret = PTR_ERR(data->hwmon_dev);
-		goto clock_dis;
-	}
-
-	return 0;
-
- clock_dis:
-	g762_of_clock_disable(client);
-
-	return ret;
-}
-
-static int g762_remove(struct i2c_client *client)
-{
-	struct g762_data *data = i2c_get_clientdata(client);
-
-	hwmon_device_unregister(data->hwmon_dev);
-	g762_of_clock_disable(client);
-
-	return 0;
+	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
 static struct i2c_driver g762_driver = {
@@ -1116,8 +1112,7 @@ static struct i2c_driver g762_driver = {
 		.name = DRVNAME,
 		.of_match_table = of_match_ptr(g762_dt_match),
 	},
-	.probe	  = g762_probe,
-	.remove	  = g762_remove,
+	.probe = g762_probe,
 	.id_table = g762_id,
 };
 

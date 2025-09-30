@@ -1,24 +1,26 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Header file for Analogix DP (Display Port) core interface driver.
  *
  * Copyright (C) 2012 Samsung Electronics Co., Ltd.
  * Author: Jingoo Han <jg1.han@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  */
 
 #ifndef _ANALOGIX_DP_CORE_H
 #define _ANALOGIX_DP_CORE_H
 
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_crtc.h>
-#include <drm/drm_dp_helper.h>
+#include <drm/drm_bridge.h>
 
 #define DP_TIMEOUT_LOOP_COUNT 100
 #define MAX_CR_LOOP 5
 #define MAX_EQ_LOOP 5
+#define MAX_PLL_LOCK_LOOP 5
+
+/* Training takes 22ms if AUX channel comm fails. Use this as retry interval */
+#define DP_TIMEOUT_TRAINING_US			22000
+#define DP_TIMEOUT_PSR_LOOP_MS			300
 
 /* DP_MAX_LANE_COUNT */
 #define DPCD_ENHANCED_FRAME_CAP(x)		(((x) >> 7) & 0x1)
@@ -32,6 +34,8 @@
 #define DPCD_PRE_EMPHASIS_GET(x)		(((x) >> 3) & 0x3)
 #define DPCD_VOLTAGE_SWING_SET(x)		(((x) & 0x3) << 0)
 #define DPCD_VOLTAGE_SWING_GET(x)		(((x) >> 0) & 0x3)
+
+struct gpio_desc;
 
 enum link_lane_count_type {
 	LANE_COUNT1 = 1,
@@ -90,11 +94,6 @@ enum color_coefficient {
 enum dynamic_range {
 	VESA,
 	CEA
-};
-
-enum pll_status {
-	PLL_UNLOCKED,
-	PLL_LOCKED
 };
 
 enum clock_recovery_m_value_type {
@@ -156,7 +155,7 @@ struct analogix_dp_device {
 	struct device		*dev;
 	struct drm_device	*drm_dev;
 	struct drm_connector	connector;
-	struct drm_bridge	*bridge;
+	struct drm_bridge	bridge;
 	struct drm_dp_aux       aux;
 	struct clk		*clock;
 	unsigned int		irq;
@@ -166,12 +165,10 @@ struct analogix_dp_device {
 	struct link_train	link_train;
 	struct phy		*phy;
 	int			dpms_mode;
-	int			hpd_gpio;
+	struct gpio_desc	*hpd_gpiod;
 	bool                    force_hpd;
-	bool			psr_support;
-
-	struct mutex		panel_lock;
-	bool			panel_is_modeset;
+	bool			fast_train_enable;
+	bool			psr_supported;
 
 	struct analogix_dp_plat_data *plat_data;
 };
@@ -187,12 +184,12 @@ void analogix_dp_swreset(struct analogix_dp_device *dp);
 void analogix_dp_config_interrupt(struct analogix_dp_device *dp);
 void analogix_dp_mute_hpd_interrupt(struct analogix_dp_device *dp);
 void analogix_dp_unmute_hpd_interrupt(struct analogix_dp_device *dp);
-enum pll_status analogix_dp_get_pll_lock_status(struct analogix_dp_device *dp);
+int analogix_dp_wait_pll_locked(struct analogix_dp_device *dp);
 void analogix_dp_set_pll_power_down(struct analogix_dp_device *dp, bool enable);
 void analogix_dp_set_analog_power_down(struct analogix_dp_device *dp,
 				       enum analog_power_block block,
 				       bool enable);
-void analogix_dp_init_analog_func(struct analogix_dp_device *dp);
+int analogix_dp_init_analog_func(struct analogix_dp_device *dp);
 void analogix_dp_init_hpd(struct analogix_dp_device *dp);
 void analogix_dp_force_hpd(struct analogix_dp_device *dp);
 enum dp_irq_type analogix_dp_get_irq_type(struct analogix_dp_device *dp);
@@ -209,26 +206,8 @@ void analogix_dp_enable_enhanced_mode(struct analogix_dp_device *dp,
 				      bool enable);
 void analogix_dp_set_training_pattern(struct analogix_dp_device *dp,
 				      enum pattern_set pattern);
-void analogix_dp_set_lane0_pre_emphasis(struct analogix_dp_device *dp,
-					u32 level);
-void analogix_dp_set_lane1_pre_emphasis(struct analogix_dp_device *dp,
-					u32 level);
-void analogix_dp_set_lane2_pre_emphasis(struct analogix_dp_device *dp,
-					u32 level);
-void analogix_dp_set_lane3_pre_emphasis(struct analogix_dp_device *dp,
-					u32 level);
-void analogix_dp_set_lane0_link_training(struct analogix_dp_device *dp,
-					 u32 training_lane);
-void analogix_dp_set_lane1_link_training(struct analogix_dp_device *dp,
-					 u32 training_lane);
-void analogix_dp_set_lane2_link_training(struct analogix_dp_device *dp,
-					 u32 training_lane);
-void analogix_dp_set_lane3_link_training(struct analogix_dp_device *dp,
-					 u32 training_lane);
-u32 analogix_dp_get_lane0_link_training(struct analogix_dp_device *dp);
-u32 analogix_dp_get_lane1_link_training(struct analogix_dp_device *dp);
-u32 analogix_dp_get_lane2_link_training(struct analogix_dp_device *dp);
-u32 analogix_dp_get_lane3_link_training(struct analogix_dp_device *dp);
+void analogix_dp_set_lane_link_training(struct analogix_dp_device *dp);
+u32 analogix_dp_get_lane_link_training(struct analogix_dp_device *dp, u8 lane);
 void analogix_dp_reset_macro(struct analogix_dp_device *dp);
 void analogix_dp_init_video(struct analogix_dp_device *dp);
 
@@ -247,8 +226,8 @@ void analogix_dp_config_video_slave_mode(struct analogix_dp_device *dp);
 void analogix_dp_enable_scrambling(struct analogix_dp_device *dp);
 void analogix_dp_disable_scrambling(struct analogix_dp_device *dp);
 void analogix_dp_enable_psr_crc(struct analogix_dp_device *dp);
-void analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
-			      struct edp_vsc_psr *vsc);
+int analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
+			     struct dp_sdp *vsc, bool blocking);
 ssize_t analogix_dp_transfer(struct analogix_dp_device *dp,
 			     struct drm_dp_aux_msg *msg);
 

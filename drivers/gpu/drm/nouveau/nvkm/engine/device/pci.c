@@ -1560,18 +1560,48 @@ nvkm_device_pci(struct nvkm_device *device)
 	return container_of(device, struct nvkm_device_pci, device);
 }
 
-static resource_size_t
-nvkm_device_pci_resource_addr(struct nvkm_device *device, unsigned bar)
+static int
+nvkm_device_pci_resource_idx(struct nvkm_device_pci *pdev, enum nvkm_bar_id bar)
 {
-	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
-	return pci_resource_start(pdev->pdev, bar);
+	int idx = 0;
+
+	if (bar == NVKM_BAR0_PRI)
+		return idx;
+
+	idx += (pci_resource_flags(pdev->pdev, idx) & IORESOURCE_MEM_64) ? 2 : 1;
+	if (bar == NVKM_BAR1_FB)
+		return idx;
+
+	idx += (pci_resource_flags(pdev->pdev, idx) & IORESOURCE_MEM_64) ? 2 : 1;
+	if (bar == NVKM_BAR2_INST)
+		return idx;
+
+	WARN_ON(1);
+	return -1;
 }
 
 static resource_size_t
-nvkm_device_pci_resource_size(struct nvkm_device *device, unsigned bar)
+nvkm_device_pci_resource_addr(struct nvkm_device *device, enum nvkm_bar_id bar)
 {
 	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
-	return pci_resource_len(pdev->pdev, bar);
+	int idx = nvkm_device_pci_resource_idx(pdev, bar);
+
+	return idx >= 0 ? pci_resource_start(pdev->pdev, idx) : 0;
+}
+
+static resource_size_t
+nvkm_device_pci_resource_size(struct nvkm_device *device, enum nvkm_bar_id bar)
+{
+	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
+	int idx = nvkm_device_pci_resource_idx(pdev, bar);
+
+	return idx >= 0 ? pci_resource_len(pdev->pdev, idx) : 0;
+}
+
+static int
+nvkm_device_pci_irq(struct nvkm_device *device)
+{
+	return nvkm_device_pci(device)->pdev->irq;
 }
 
 static void
@@ -1612,6 +1642,7 @@ nvkm_device_pci_func = {
 	.dtor = nvkm_device_pci_dtor,
 	.preinit = nvkm_device_pci_preinit,
 	.fini = nvkm_device_pci_fini,
+	.irq = nvkm_device_pci_irq,
 	.resource_addr = nvkm_device_pci_resource_addr,
 	.resource_size = nvkm_device_pci_resource_size,
 	.cpu_coherent = !IS_ENABLED(CONFIG_ARM),
@@ -1619,7 +1650,6 @@ nvkm_device_pci_func = {
 
 int
 nvkm_device_pci_new(struct pci_dev *pci_dev, const char *cfg, const char *dbg,
-		    bool detect, bool mmio, u64 subdev_mask,
 		    struct nvkm_device **pdevice)
 {
 	const struct nvkm_device_quirk *quirk = NULL;
@@ -1627,7 +1657,7 @@ nvkm_device_pci_new(struct pci_dev *pci_dev, const char *cfg, const char *dbg,
 	const struct nvkm_device_pci_vendor *pciv;
 	const char *name = NULL;
 	struct nvkm_device_pci *pdev;
-	int ret;
+	int ret, bits;
 
 	ret = pci_enable_device(pci_dev);
 	if (ret)
@@ -1673,23 +1703,22 @@ nvkm_device_pci_new(struct pci_dev *pci_dev, const char *cfg, const char *dbg,
 				    pci_dev->bus->number << 16 |
 				    PCI_SLOT(pci_dev->devfn) << 8 |
 				    PCI_FUNC(pci_dev->devfn), name,
-			       cfg, dbg, detect, mmio, subdev_mask,
-			       &pdev->device);
+			       cfg, dbg, &pdev->device);
 
 	if (ret)
 		return ret;
 
-	/*
-	 * Set a preliminary DMA mask based on the .dma_bits member of the
-	 * MMU subdevice. This allows other subdevices to create DMA mappings
-	 * in their init() or oneinit() methods, which may be called before the
-	 * TTM layer sets the DMA mask definitively.
-	 * This is necessary for platforms where the default DMA mask of 32
-	 * does not cover any system memory, i.e., when all RAM is > 4 GB.
-	 */
-	if (pdev->device.mmu)
-		dma_set_mask_and_coherent(&pci_dev->dev,
-				DMA_BIT_MASK(pdev->device.mmu->dma_bits));
+	/* Set DMA mask based on capabilities reported by the MMU subdev. */
+	if (pdev->device.mmu && !pdev->device.pci->agp.bridge)
+		bits = pdev->device.mmu->dma_bits;
+	else
+		bits = 32;
+
+	ret = dma_set_mask_and_coherent(&pci_dev->dev, DMA_BIT_MASK(bits));
+	if (ret && bits != 32) {
+		dma_set_mask_and_coherent(&pci_dev->dev, DMA_BIT_MASK(32));
+		pdev->device.mmu->dma_bits = 32;
+	}
 
 	return 0;
 }

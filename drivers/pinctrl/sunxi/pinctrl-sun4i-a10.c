@@ -13,10 +13,13 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-sunxi.h"
+
+#define PINCTRL_SUN4I_A10	BIT(0)
+#define PINCTRL_SUN7I_A20	BIT(1)
+#define PINCTRL_SUN8I_R40	BIT(2)
 
 static const struct sunxi_desc_pin sun4i_a10_pins[] = {
 	SUNXI_PIN(SUNXI_PINCTRL_PIN(A, 0),
@@ -1167,7 +1170,7 @@ static const struct sunxi_desc_pin sun4i_a10_pins[] = {
 		  SUNXI_FUNCTION(0x0, "gpio_in"),
 		  SUNXI_FUNCTION(0x1, "gpio_out"),
 		  SUNXI_FUNCTION(0x2, "pwm"),		/* PWM1 */
-		  SUNXI_FUNCTION_VARIANT(0x3, "i2c3",	/* SDA */
+		  SUNXI_FUNCTION_VARIANT(0x3, "i2c4",	/* SDA */
 					 PINCTRL_SUN7I_A20 |
 					 PINCTRL_SUN8I_R40)),
 	SUNXI_PIN(SUNXI_PINCTRL_PIN(I, 4),
@@ -1289,14 +1292,15 @@ static const struct sunxi_pinctrl_desc sun4i_a10_pinctrl_data = {
 	.npins = ARRAY_SIZE(sun4i_a10_pins),
 	.irq_banks = 1,
 	.irq_read_needs_mux = true,
+	.disable_strict_mode = true,
 };
 
 static int sun4i_a10_pinctrl_probe(struct platform_device *pdev)
 {
 	unsigned long variant = (unsigned long)of_device_get_match_data(&pdev->dev);
 
-	return sunxi_pinctrl_init_with_variant(pdev, &sun4i_a10_pinctrl_data,
-					       variant);
+	return sunxi_pinctrl_init_with_flags(pdev, &sun4i_a10_pinctrl_data,
+					     variant);
 }
 
 static const struct of_device_id sun4i_a10_pinctrl_match[] = {

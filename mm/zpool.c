@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * zpool memory storage api
  *
@@ -20,16 +21,10 @@
 struct zpool {
 	struct zpool_driver *driver;
 	void *pool;
-	const struct zpool_ops *ops;
-
-	struct list_head list;
 };
 
 static LIST_HEAD(drivers_head);
 static DEFINE_SPINLOCK(drivers_lock);
-
-static LIST_HEAD(pools_head);
-static DEFINE_SPINLOCK(pools_lock);
 
 /**
  * zpool_register_driver() - register a zpool implementation.
@@ -100,7 +95,7 @@ static void zpool_put_driver(struct zpool_driver *driver)
 
 /**
  * zpool_has_pool() - Check if the pool driver is available
- * @type	The type of the zpool to check (e.g. zbud, zsmalloc)
+ * @type:	The type of the zpool to check (e.g. zsmalloc)
  *
  * This checks if the @type pool driver is available.  This will try to load
  * the requested module, if needed, but there is no guarantee the module will
@@ -135,14 +130,13 @@ EXPORT_SYMBOL(zpool_has_pool);
 
 /**
  * zpool_create_pool() - Create a new zpool
- * @type	The type of the zpool to create (e.g. zbud, zsmalloc)
- * @name	The name of the zpool (e.g. zram0, zswap)
- * @gfp		The GFP flags to use when allocating the pool.
- * @ops		The optional ops callback.
+ * @type:	The type of the zpool to create (e.g. zsmalloc)
+ * @name:	The name of the zpool (e.g. zram0, zswap)
+ * @gfp:	The GFP flags to use when allocating the pool.
  *
  * This creates a new zpool of the specified type.  The gfp flags will be
  * used when allocating memory, if the implementation supports it.  If the
- * ops param is NULL, then the created zpool will not be shrinkable.
+ * ops param is NULL, then the created zpool will not be evictable.
  *
  * Implementations must guarantee this to be thread-safe.
  *
@@ -150,8 +144,7 @@ EXPORT_SYMBOL(zpool_has_pool);
  *
  * Returns: New zpool on success, NULL on failure.
  */
-struct zpool *zpool_create_pool(const char *type, const char *name, gfp_t gfp,
-		const struct zpool_ops *ops)
+struct zpool *zpool_create_pool(const char *type, const char *name, gfp_t gfp)
 {
 	struct zpool_driver *driver;
 	struct zpool *zpool;
@@ -178,8 +171,7 @@ struct zpool *zpool_create_pool(const char *type, const char *name, gfp_t gfp,
 	}
 
 	zpool->driver = driver;
-	zpool->pool = driver->create(name, gfp, ops, zpool);
-	zpool->ops = ops;
+	zpool->pool = driver->create(name, gfp);
 
 	if (!zpool->pool) {
 		pr_err("couldn't create %s pool\n", type);
@@ -190,16 +182,12 @@ struct zpool *zpool_create_pool(const char *type, const char *name, gfp_t gfp,
 
 	pr_debug("created pool type %s\n", type);
 
-	spin_lock(&pools_lock);
-	list_add(&zpool->list, &pools_head);
-	spin_unlock(&pools_lock);
-
 	return zpool;
 }
 
 /**
  * zpool_destroy_pool() - Destroy a zpool
- * @pool	The zpool to destroy.
+ * @zpool:	The zpool to destroy.
  *
  * Implementations must guarantee this to be thread-safe,
  * however only when destroying different pools.  The same
@@ -212,9 +200,6 @@ void zpool_destroy_pool(struct zpool *zpool)
 {
 	pr_debug("destroying pool type %s\n", zpool->driver->type);
 
-	spin_lock(&pools_lock);
-	list_del(&zpool->list);
-	spin_unlock(&pools_lock);
 	zpool->driver->destroy(zpool->pool);
 	zpool_put_driver(zpool->driver);
 	kfree(zpool);
@@ -222,7 +207,7 @@ void zpool_destroy_pool(struct zpool *zpool)
 
 /**
  * zpool_get_type() - Get the type of the zpool
- * @pool	The zpool to check
+ * @zpool:	The zpool to check
  *
  * This returns the type of the pool.
  *
@@ -237,30 +222,32 @@ const char *zpool_get_type(struct zpool *zpool)
 
 /**
  * zpool_malloc() - Allocate memory
- * @pool	The zpool to allocate from.
- * @size	The amount of memory to allocate.
- * @gfp		The GFP flags to use when allocating memory.
- * @handle	Pointer to the handle to set
+ * @zpool:	The zpool to allocate from.
+ * @size:	The amount of memory to allocate.
+ * @gfp:	The GFP flags to use when allocating memory.
+ * @handle:	Pointer to the handle to set
+ * @nid:	The preferred node id.
  *
  * This allocates the requested amount of memory from the pool.
  * The gfp flags will be used when allocating memory, if the
  * implementation supports it.  The provided @handle will be
- * set to the allocated object handle.
+ * set to the allocated object handle. The allocation will
+ * prefer the NUMA node specified by @nid.
  *
  * Implementations must guarantee this to be thread-safe.
  *
  * Returns: 0 on success, negative value on error.
  */
 int zpool_malloc(struct zpool *zpool, size_t size, gfp_t gfp,
-			unsigned long *handle)
+		 unsigned long *handle, const int nid)
 {
-	return zpool->driver->malloc(zpool->pool, size, gfp, handle);
+	return zpool->driver->malloc(zpool->pool, size, gfp, handle, nid);
 }
 
 /**
  * zpool_free() - Free previously allocated memory
- * @pool	The zpool that allocated the memory.
- * @handle	The handle to the memory to free.
+ * @zpool:	The zpool that allocated the memory.
+ * @handle:	The handle to the memory to free.
  *
  * This frees previously allocated memory.  This does not guarantee
  * that the pool will actually free memory, only that the memory
@@ -277,84 +264,65 @@ void zpool_free(struct zpool *zpool, unsigned long handle)
 }
 
 /**
- * zpool_shrink() - Shrink the pool size
- * @pool	The zpool to shrink.
- * @pages	The number of pages to shrink the pool.
- * @reclaimed	The number of pages successfully evicted.
+ * zpool_obj_read_begin() - Start reading from a previously allocated handle.
+ * @zpool:	The zpool that the handle was allocated from
+ * @handle:	The handle to read from
+ * @local_copy:	A local buffer to use if needed.
  *
- * This attempts to shrink the actual memory size of the pool
- * by evicting currently used handle(s).  If the pool was
- * created with no zpool_ops, or the evict call fails for any
- * of the handles, this will fail.  If non-NULL, the @reclaimed
- * parameter will be set to the number of pages reclaimed,
- * which may be more than the number of pages requested.
+ * This starts a read operation of a previously allocated handle. The passed
+ * @local_copy buffer may be used if needed by copying the memory into.
+ * zpool_obj_read_end() MUST be called after the read is completed to undo any
+ * actions taken (e.g. release locks).
  *
- * Implementations must guarantee this to be thread-safe.
- *
- * Returns: 0 on success, negative value on error/failure.
+ * Returns: A pointer to the handle memory to be read, if @local_copy is used,
+ * the returned pointer is @local_copy.
  */
-int zpool_shrink(struct zpool *zpool, unsigned int pages,
-			unsigned int *reclaimed)
+void *zpool_obj_read_begin(struct zpool *zpool, unsigned long handle,
+			   void *local_copy)
 {
-	return zpool->driver->shrink(zpool->pool, pages, reclaimed);
+	return zpool->driver->obj_read_begin(zpool->pool, handle, local_copy);
 }
 
 /**
- * zpool_map_handle() - Map a previously allocated handle into memory
- * @pool	The zpool that the handle was allocated from
- * @handle	The handle to map
- * @mm		How the memory should be mapped
+ * zpool_obj_read_end() - Finish reading from a previously allocated handle.
+ * @zpool:	The zpool that the handle was allocated from
+ * @handle:	The handle to read from
+ * @handle_mem:	The pointer returned by zpool_obj_read_begin()
  *
- * This maps a previously allocated handle into memory.  The @mm
- * param indicates to the implementation how the memory will be
- * used, i.e. read-only, write-only, read-write.  If the
- * implementation does not support it, the memory will be treated
- * as read-write.
- *
- * This may hold locks, disable interrupts, and/or preemption,
- * and the zpool_unmap_handle() must be called to undo those
- * actions.  The code that uses the mapped handle should complete
- * its operatons on the mapped handle memory quickly and unmap
- * as soon as possible.  As the implementation may use per-cpu
- * data, multiple handles should not be mapped concurrently on
- * any cpu.
- *
- * Returns: A pointer to the handle's mapped memory area.
+ * Finishes a read operation previously started by zpool_obj_read_begin().
  */
-void *zpool_map_handle(struct zpool *zpool, unsigned long handle,
-			enum zpool_mapmode mapmode)
+void zpool_obj_read_end(struct zpool *zpool, unsigned long handle,
+			void *handle_mem)
 {
-	return zpool->driver->map(zpool->pool, handle, mapmode);
+	zpool->driver->obj_read_end(zpool->pool, handle, handle_mem);
 }
 
 /**
- * zpool_unmap_handle() - Unmap a previously mapped handle
- * @pool	The zpool that the handle was allocated from
- * @handle	The handle to unmap
+ * zpool_obj_write() - Write to a previously allocated handle.
+ * @zpool:	The zpool that the handle was allocated from
+ * @handle:	The handle to read from
+ * @handle_mem:	The memory to copy from into the handle.
+ * @mem_len:	The length of memory to be written.
  *
- * This unmaps a previously mapped handle.  Any locks or other
- * actions that the implementation took in zpool_map_handle()
- * will be undone here.  The memory area returned from
- * zpool_map_handle() should no longer be used after this.
  */
-void zpool_unmap_handle(struct zpool *zpool, unsigned long handle)
+void zpool_obj_write(struct zpool *zpool, unsigned long handle,
+		     void *handle_mem, size_t mem_len)
 {
-	zpool->driver->unmap(zpool->pool, handle);
+	zpool->driver->obj_write(zpool->pool, handle, handle_mem, mem_len);
 }
 
 /**
- * zpool_get_total_size() - The total size of the pool
- * @pool	The zpool to check
+ * zpool_get_total_pages() - The total size of the pool
+ * @zpool:	The zpool to check
  *
- * This returns the total size in bytes of the pool.
+ * This returns the total size in pages of the pool.
  *
- * Returns: Total size of the zpool in bytes.
+ * Returns: Total size of the zpool in pages.
  */
-u64 zpool_get_total_size(struct zpool *zpool)
+u64 zpool_get_total_pages(struct zpool *zpool)
 {
-	return zpool->driver->total_size(zpool->pool);
+	return zpool->driver->total_pages(zpool->pool);
 }
 
-MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Dan Streetman <ddstreet@ieee.org>");
 MODULE_DESCRIPTION("Common API for compressed memory storage");

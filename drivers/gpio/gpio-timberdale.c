@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Timberdale FPGA GPIO driver
  * Author: Mocean Laboratories
  * Copyright (c) 2009 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /* Supports:
@@ -22,7 +10,7 @@
  */
 
 #include <linux/init.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/io.h>
@@ -55,9 +43,10 @@ static int timbgpio_update_bit(struct gpio_chip *gpio, unsigned index,
 	unsigned offset, bool enabled)
 {
 	struct timbgpio *tgpio = gpiochip_get_data(gpio);
+	unsigned long flags;
 	u32 reg;
 
-	spin_lock(&tgpio->lock);
+	spin_lock_irqsave(&tgpio->lock, flags);
 	reg = ioread32(tgpio->membase + offset);
 
 	if (enabled)
@@ -66,7 +55,7 @@ static int timbgpio_update_bit(struct gpio_chip *gpio, unsigned index,
 		reg &= ~(1 << index);
 
 	iowrite32(reg, tgpio->membase + offset);
-	spin_unlock(&tgpio->lock);
+	spin_unlock_irqrestore(&tgpio->lock, flags);
 
 	return 0;
 }
@@ -91,10 +80,9 @@ static int timbgpio_gpio_direction_output(struct gpio_chip *gpio,
 	return timbgpio_update_bit(gpio, nr, TGPIODIR, false);
 }
 
-static void timbgpio_gpio_set(struct gpio_chip *gpio,
-				unsigned nr, int val)
+static int timbgpio_gpio_set(struct gpio_chip *gpio, unsigned int nr, int val)
 {
-	timbgpio_update_bit(gpio, nr, TGPIOVAL, val != 0);
+	return timbgpio_update_bit(gpio, nr, TGPIOVAL, val != 0);
 }
 
 static int timbgpio_to_irq(struct gpio_chip *gpio, unsigned offset)
@@ -114,19 +102,25 @@ static void timbgpio_irq_disable(struct irq_data *d)
 {
 	struct timbgpio *tgpio = irq_data_get_irq_chip_data(d);
 	int offset = d->irq - tgpio->irq_base;
+	irq_hw_number_t hwirq = irqd_to_hwirq(d);
 	unsigned long flags;
 
 	spin_lock_irqsave(&tgpio->lock, flags);
 	tgpio->last_ier &= ~(1UL << offset);
 	iowrite32(tgpio->last_ier, tgpio->membase + TGPIO_IER);
 	spin_unlock_irqrestore(&tgpio->lock, flags);
+
+	gpiochip_disable_irq(&tgpio->gpio, hwirq);
 }
 
 static void timbgpio_irq_enable(struct irq_data *d)
 {
 	struct timbgpio *tgpio = irq_data_get_irq_chip_data(d);
 	int offset = d->irq - tgpio->irq_base;
+	irq_hw_number_t hwirq = irqd_to_hwirq(d);
 	unsigned long flags;
+
+	gpiochip_enable_irq(&tgpio->gpio, hwirq);
 
 	spin_lock_irqsave(&tgpio->lock, flags);
 	tgpio->last_ier |= 1UL << offset;
@@ -143,7 +137,7 @@ static int timbgpio_irq_type(struct irq_data *d, unsigned trigger)
 	u32 ver;
 	int ret = 0;
 
-	if (offset < 0 || offset > tgpio->gpio.ngpio)
+	if (offset < 0 || offset >= tgpio->gpio.ngpio)
 		return -EINVAL;
 
 	ver = ioread32(tgpio->membase + TGPIO_VER);
@@ -216,11 +210,13 @@ static void timbgpio_irq(struct irq_desc *desc)
 	iowrite32(tgpio->last_ier, tgpio->membase + TGPIO_IER);
 }
 
-static struct irq_chip timbgpio_irqchip = {
+static const struct irq_chip timbgpio_irqchip = {
 	.name		= "GPIO",
 	.irq_enable	= timbgpio_irq_enable,
 	.irq_disable	= timbgpio_irq_disable,
 	.irq_set_type	= timbgpio_irq_type,
+	.flags = IRQCHIP_IMMUTABLE,
+	GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static int timbgpio_probe(struct platform_device *pdev)
@@ -229,7 +225,6 @@ static int timbgpio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct gpio_chip *gc;
 	struct timbgpio *tgpio;
-	struct resource *iomem;
 	struct timbgpio_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	int irq = platform_get_irq(pdev, 0);
 
@@ -238,17 +233,15 @@ static int timbgpio_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	tgpio = devm_kzalloc(dev, sizeof(struct timbgpio), GFP_KERNEL);
-	if (!tgpio) {
-		dev_err(dev, "Memory alloc failed\n");
+	tgpio = devm_kzalloc(dev, sizeof(*tgpio), GFP_KERNEL);
+	if (!tgpio)
 		return -EINVAL;
-	}
+
 	tgpio->irq_base = pdata->irq_base;
 
 	spin_lock_init(&tgpio->lock);
 
-	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	tgpio->membase = devm_ioremap_resource(dev, iomem);
+	tgpio->membase = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(tgpio->membase))
 		return PTR_ERR(tgpio->membase);
 
@@ -270,8 +263,6 @@ static int timbgpio_probe(struct platform_device *pdev)
 	err = devm_gpiochip_add_data(&pdev->dev, gc, tgpio);
 	if (err)
 		return err;
-
-	platform_set_drvdata(pdev, tgpio);
 
 	/* make sure to disable interrupts */
 	iowrite32(0x0, tgpio->membase + TGPIO_IER);

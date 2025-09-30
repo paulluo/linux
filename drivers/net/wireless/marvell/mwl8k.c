@@ -199,7 +199,7 @@ struct mwl8k_priv {
 	struct ieee80211_channel channels_24[14];
 	struct ieee80211_rate rates_24[13];
 	struct ieee80211_supported_band band_50;
-	struct ieee80211_channel channels_50[4];
+	struct ieee80211_channel channels_50[9];
 	struct ieee80211_rate rates_50[8];
 	u32 ap_macids_supported;
 	u32 sta_macids_supported;
@@ -383,6 +383,11 @@ static const struct ieee80211_channel mwl8k_channels_50[] = {
 	{ .band = NL80211_BAND_5GHZ, .center_freq = 5200, .hw_value = 40, },
 	{ .band = NL80211_BAND_5GHZ, .center_freq = 5220, .hw_value = 44, },
 	{ .band = NL80211_BAND_5GHZ, .center_freq = 5240, .hw_value = 48, },
+	{ .band = NL80211_BAND_5GHZ, .center_freq = 5745, .hw_value = 149, },
+	{ .band = NL80211_BAND_5GHZ, .center_freq = 5765, .hw_value = 153, },
+	{ .band = NL80211_BAND_5GHZ, .center_freq = 5785, .hw_value = 157, },
+	{ .band = NL80211_BAND_5GHZ, .center_freq = 5805, .hw_value = 161, },
+	{ .band = NL80211_BAND_5GHZ, .center_freq = 5825, .hw_value = 165, },
 };
 
 static const struct ieee80211_rate mwl8k_rates_50[] = {
@@ -435,6 +440,9 @@ static const struct ieee80211_rate mwl8k_rates_50[] = {
 #define MWL8K_CMD_UPDATE_ENCRYPTION	0x1122		/* per-vif */
 #define MWL8K_CMD_UPDATE_STADB		0x1123
 #define MWL8K_CMD_BASTREAM		0x1125
+
+#define MWL8K_LEGACY_5G_RATE_OFFSET \
+	(ARRAY_SIZE(mwl8k_rates_24) - ARRAY_SIZE(mwl8k_rates_50))
 
 static const char *mwl8k_cmd_name(__le16 cmd, char *buf, int bufsize)
 {
@@ -579,13 +587,18 @@ static int mwl8k_request_firmware(struct mwl8k_priv *priv, char *fw_image,
 }
 
 struct mwl8k_cmd_pkt {
-	__le16	code;
-	__le16	length;
-	__u8	seq_num;
-	__u8	macid;
-	__le16	result;
-	char	payload[0];
+	/* New members MUST be added within the __struct_group() macro below. */
+	__struct_group(mwl8k_cmd_pkt_hdr, hdr, __packed,
+		__le16	code;
+		__le16	length;
+		__u8	seq_num;
+		__u8	macid;
+		__le16	result;
+	);
+	char payload[];
 } __packed;
+static_assert(offsetof(struct mwl8k_cmd_pkt, payload) == sizeof(struct mwl8k_cmd_pkt_hdr),
+	      "struct member likely outside of __struct_group()");
 
 /*
  * Firmware loading.
@@ -597,8 +610,9 @@ mwl8k_send_fw_load_cmd(struct mwl8k_priv *priv, void *data, int length)
 	dma_addr_t dma_addr;
 	int loops;
 
-	dma_addr = pci_map_single(priv->pdev, data, length, PCI_DMA_TODEVICE);
-	if (pci_dma_mapping_error(priv->pdev, dma_addr))
+	dma_addr = dma_map_single(&priv->pdev->dev, data, length,
+				  DMA_TO_DEVICE);
+	if (dma_mapping_error(&priv->pdev->dev, dma_addr))
 		return -ENOMEM;
 
 	iowrite32(dma_addr, regs + MWL8K_HIU_GEN_PTR);
@@ -627,7 +641,7 @@ mwl8k_send_fw_load_cmd(struct mwl8k_priv *priv, void *data, int length)
 		udelay(1);
 	} while (--loops);
 
-	pci_unmap_single(priv->pdev, dma_addr, length, PCI_DMA_TODEVICE);
+	dma_unmap_single(&priv->pdev->dev, dma_addr, length, DMA_TO_DEVICE);
 
 	return loops ? 0 : -ETIMEDOUT;
 }
@@ -798,8 +812,8 @@ static int mwl8k_load_firmware(struct ieee80211_hw *hw)
 struct mwl8k_dma_data {
 	__le16 fwlen;
 	struct ieee80211_hdr wh;
-	char data[0];
-} __packed;
+	char data[];
+} __packed __aligned(2);
 
 /* Routines to add/remove DMA header from skb.  */
 static inline void mwl8k_remove_dma_header(struct sk_buff *skb, __le16 qos)
@@ -1011,8 +1025,9 @@ mwl8k_rxd_ap_process(void *_rxd, struct ieee80211_rx_status *status,
 
 	if (rxd->channel > 14) {
 		status->band = NL80211_BAND_5GHZ;
-		if (!(status->encoding == RX_ENC_HT))
-			status->rate_idx -= 5;
+		if (!(status->encoding == RX_ENC_HT) &&
+		    status->rate_idx >= MWL8K_LEGACY_5G_RATE_OFFSET)
+			status->rate_idx -= MWL8K_LEGACY_5G_RATE_OFFSET;
 	} else {
 		status->band = NL80211_BAND_2GHZ;
 	}
@@ -1119,8 +1134,9 @@ mwl8k_rxd_sta_process(void *_rxd, struct ieee80211_rx_status *status,
 
 	if (rxd->channel > 14) {
 		status->band = NL80211_BAND_5GHZ;
-		if (!(status->encoding == RX_ENC_HT))
-			status->rate_idx -= 5;
+		if (!(status->encoding == RX_ENC_HT) &&
+		    status->rate_idx >= MWL8K_LEGACY_5G_RATE_OFFSET)
+			status->rate_idx -= MWL8K_LEGACY_5G_RATE_OFFSET;
 	} else {
 		status->band = NL80211_BAND_2GHZ;
 	}
@@ -1159,7 +1175,8 @@ static int mwl8k_rxq_init(struct ieee80211_hw *hw, int index)
 
 	size = MWL8K_RX_DESCS * priv->rxd_ops->rxd_size;
 
-	rxq->rxd = pci_zalloc_consistent(priv->pdev, size, &rxq->rxd_dma);
+	rxq->rxd = dma_alloc_coherent(&priv->pdev->dev, size, &rxq->rxd_dma,
+				      GFP_KERNEL);
 	if (rxq->rxd == NULL) {
 		wiphy_err(hw->wiphy, "failed to alloc RX descriptors\n");
 		return -ENOMEM;
@@ -1167,7 +1184,8 @@ static int mwl8k_rxq_init(struct ieee80211_hw *hw, int index)
 
 	rxq->buf = kcalloc(MWL8K_RX_DESCS, sizeof(*rxq->buf), GFP_KERNEL);
 	if (rxq->buf == NULL) {
-		pci_free_consistent(priv->pdev, size, rxq->rxd, rxq->rxd_dma);
+		dma_free_coherent(&priv->pdev->dev, size, rxq->rxd,
+				  rxq->rxd_dma);
 		return -ENOMEM;
 	}
 
@@ -1195,9 +1213,8 @@ static int rxq_refill(struct ieee80211_hw *hw, int index, int limit)
 {
 	struct mwl8k_priv *priv = hw->priv;
 	struct mwl8k_rx_queue *rxq = priv->rxq + index;
-	int refilled;
+	int refilled = 0;
 
-	refilled = 0;
 	while (rxq->rxd_count < MWL8K_RX_DESCS && limit--) {
 		struct sk_buff *skb;
 		dma_addr_t addr;
@@ -1208,8 +1225,12 @@ static int rxq_refill(struct ieee80211_hw *hw, int index, int limit)
 		if (skb == NULL)
 			break;
 
-		addr = pci_map_single(priv->pdev, skb->data,
+		addr = dma_map_single(&priv->pdev->dev, skb->data,
 				      MWL8K_RX_MAXSZ, DMA_FROM_DEVICE);
+		if (dma_mapping_error(&priv->pdev->dev, addr)) {
+			kfree_skb(skb);
+			break;
+		}
 
 		rxq->rxd_count++;
 		rx = rxq->tail++;
@@ -1239,9 +1260,9 @@ static void mwl8k_rxq_deinit(struct ieee80211_hw *hw, int index)
 
 	for (i = 0; i < MWL8K_RX_DESCS; i++) {
 		if (rxq->buf[i].skb != NULL) {
-			pci_unmap_single(priv->pdev,
+			dma_unmap_single(&priv->pdev->dev,
 					 dma_unmap_addr(&rxq->buf[i], dma),
-					 MWL8K_RX_MAXSZ, PCI_DMA_FROMDEVICE);
+					 MWL8K_RX_MAXSZ, DMA_FROM_DEVICE);
 			dma_unmap_addr_set(&rxq->buf[i], dma, 0);
 
 			kfree_skb(rxq->buf[i].skb);
@@ -1252,9 +1273,9 @@ static void mwl8k_rxq_deinit(struct ieee80211_hw *hw, int index)
 	kfree(rxq->buf);
 	rxq->buf = NULL;
 
-	pci_free_consistent(priv->pdev,
-			    MWL8K_RX_DESCS * priv->rxd_ops->rxd_size,
-			    rxq->rxd, rxq->rxd_dma);
+	dma_free_coherent(&priv->pdev->dev,
+			  MWL8K_RX_DESCS * priv->rxd_ops->rxd_size, rxq->rxd,
+			  rxq->rxd_dma);
 	rxq->rxd = NULL;
 }
 
@@ -1333,9 +1354,9 @@ static int rxq_process(struct ieee80211_hw *hw, int index, int limit)
 
 		rxq->buf[rxq->head].skb = NULL;
 
-		pci_unmap_single(priv->pdev,
+		dma_unmap_single(&priv->pdev->dev,
 				 dma_unmap_addr(&rxq->buf[rxq->head], dma),
-				 MWL8K_RX_MAXSZ, PCI_DMA_FROMDEVICE);
+				 MWL8K_RX_MAXSZ, DMA_FROM_DEVICE);
 		dma_unmap_addr_set(&rxq->buf[rxq->head], dma, 0);
 
 		rxq->head++;
@@ -1450,7 +1471,8 @@ static int mwl8k_txq_init(struct ieee80211_hw *hw, int index)
 
 	size = MWL8K_TX_DESCS * sizeof(struct mwl8k_tx_desc);
 
-	txq->txd = pci_zalloc_consistent(priv->pdev, size, &txq->txd_dma);
+	txq->txd = dma_alloc_coherent(&priv->pdev->dev, size, &txq->txd_dma,
+				      GFP_KERNEL);
 	if (txq->txd == NULL) {
 		wiphy_err(hw->wiphy, "failed to alloc TX descriptors\n");
 		return -ENOMEM;
@@ -1458,7 +1480,9 @@ static int mwl8k_txq_init(struct ieee80211_hw *hw, int index)
 
 	txq->skb = kcalloc(MWL8K_TX_DESCS, sizeof(*txq->skb), GFP_KERNEL);
 	if (txq->skb == NULL) {
-		pci_free_consistent(priv->pdev, size, txq->txd, txq->txd_dma);
+		dma_free_coherent(&priv->pdev->dev, size, txq->txd,
+				  txq->txd_dma);
+		txq->txd = NULL;
 		return -ENOMEM;
 	}
 
@@ -1697,7 +1721,7 @@ mwl8k_txq_reclaim(struct ieee80211_hw *hw, int index, int limit, int force)
 		txq->skb[tx] = NULL;
 
 		BUG_ON(skb == NULL);
-		pci_unmap_single(priv->pdev, addr, size, PCI_DMA_TODEVICE);
+		dma_unmap_single(&priv->pdev->dev, addr, size, DMA_TO_DEVICE);
 
 		mwl8k_remove_dma_header(skb, tx_desc->qos_control);
 
@@ -1764,9 +1788,9 @@ static void mwl8k_txq_deinit(struct ieee80211_hw *hw, int index)
 	kfree(txq->skb);
 	txq->skb = NULL;
 
-	pci_free_consistent(priv->pdev,
-			    MWL8K_TX_DESCS * sizeof(struct mwl8k_tx_desc),
-			    txq->txd, txq->txd_dma);
+	dma_free_coherent(&priv->pdev->dev,
+			  MWL8K_TX_DESCS * sizeof(struct mwl8k_tx_desc),
+			  txq->txd, txq->txd_dma);
 	txq->txd = NULL;
 }
 
@@ -1865,7 +1889,7 @@ static inline void mwl8k_tx_count_packet(struct ieee80211_sta *sta, u8 tid)
 	 * packets ever exceeds the ampdu_min_traffic threshold, we will allow
 	 * an ampdu stream to be started.
 	 */
-	if (jiffies - tx_stats->start_time > HZ) {
+	if (time_after(jiffies, (unsigned long)tx_stats->start_time + HZ)) {
 		tx_stats->pkts = 0;
 		tx_stats->start_time = 0;
 	} else
@@ -1970,7 +1994,7 @@ mwl8k_txq_xmit(struct ieee80211_hw *hw,
 
 	txpriority = index;
 
-	if (priv->ap_fw && sta && sta->ht_cap.ht_supported && !eapol_frame &&
+	if (priv->ap_fw && sta && sta->deflink.ht_cap.ht_supported && !eapol_frame &&
 	    ieee80211_is_data_qos(wh->frame_control)) {
 		tid = qos & 0xf;
 		mwl8k_tx_count_packet(sta, tid);
@@ -2031,10 +2055,10 @@ mwl8k_txq_xmit(struct ieee80211_hw *hw,
 		qos |= MWL8K_QOS_ACK_POLICY_NORMAL;
 	}
 
-	dma = pci_map_single(priv->pdev, skb->data,
-				skb->len, PCI_DMA_TODEVICE);
+	dma = dma_map_single(&priv->pdev->dev, skb->data, skb->len,
+			     DMA_TO_DEVICE);
 
-	if (pci_dma_mapping_error(priv->pdev, dma)) {
+	if (dma_mapping_error(&priv->pdev->dev, dma)) {
 		wiphy_debug(hw->wiphy,
 			    "failed to dma map skb, dropping TX frame.\n");
 		if (start_ba_session) {
@@ -2067,8 +2091,8 @@ mwl8k_txq_xmit(struct ieee80211_hw *hw,
 			}
 			mwl8k_tx_start(priv);
 			spin_unlock_bh(&priv->tx_lock);
-			pci_unmap_single(priv->pdev, dma, skb->len,
-					 PCI_DMA_TODEVICE);
+			dma_unmap_single(&priv->pdev->dev, dma, skb->len,
+					 DMA_TO_DEVICE);
 			dev_kfree_skb(skb);
 			return;
 		}
@@ -2186,7 +2210,7 @@ static void mwl8k_enable_bsses(struct ieee80211_hw *hw, bool enable,
 /* Timeout firmware commands after 10s */
 #define MWL8K_CMD_TIMEOUT_MS	10000
 
-static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
+static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt_hdr *cmd)
 {
 	DECLARE_COMPLETION_ONSTACK(cmd_wait);
 	struct mwl8k_priv *priv = hw->priv;
@@ -2194,7 +2218,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 	dma_addr_t dma_addr;
 	unsigned int dma_size;
 	int rc;
-	unsigned long timeout = 0;
+	unsigned long time_left = 0;
 	u8 buf[32];
 	u32 bitmap = 0;
 
@@ -2227,10 +2251,12 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 
 	cmd->result = (__force __le16) 0xffff;
 	dma_size = le16_to_cpu(cmd->length);
-	dma_addr = pci_map_single(priv->pdev, cmd, dma_size,
-				  PCI_DMA_BIDIRECTIONAL);
-	if (pci_dma_mapping_error(priv->pdev, dma_addr))
-		return -ENOMEM;
+	dma_addr = dma_map_single(&priv->pdev->dev, cmd, dma_size,
+				  DMA_BIDIRECTIONAL);
+	if (dma_mapping_error(&priv->pdev->dev, dma_addr)) {
+		rc = -ENOMEM;
+		goto exit;
+	}
 
 	priv->hostcmd_wait = &cmd_wait;
 	iowrite32(dma_addr, regs + MWL8K_HIU_GEN_PTR);
@@ -2239,16 +2265,16 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 	iowrite32(MWL8K_H2A_INT_DUMMY,
 		regs + MWL8K_HIU_H2A_INTERRUPT_EVENTS);
 
-	timeout = wait_for_completion_timeout(&cmd_wait,
-				msecs_to_jiffies(MWL8K_CMD_TIMEOUT_MS));
+	time_left = wait_for_completion_timeout(&cmd_wait,
+						msecs_to_jiffies(MWL8K_CMD_TIMEOUT_MS));
 
 	priv->hostcmd_wait = NULL;
 
 
-	pci_unmap_single(priv->pdev, dma_addr, dma_size,
-					PCI_DMA_BIDIRECTIONAL);
+	dma_unmap_single(&priv->pdev->dev, dma_addr, dma_size,
+			 DMA_BIDIRECTIONAL);
 
-	if (!timeout) {
+	if (!time_left) {
 		wiphy_err(hw->wiphy, "Command %s timeout after %u ms\n",
 			  mwl8k_cmd_name(cmd->code, buf, sizeof(buf)),
 			  MWL8K_CMD_TIMEOUT_MS);
@@ -2256,7 +2282,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 	} else {
 		int ms;
 
-		ms = MWL8K_CMD_TIMEOUT_MS - jiffies_to_msecs(timeout);
+		ms = MWL8K_CMD_TIMEOUT_MS - jiffies_to_msecs(time_left);
 
 		rc = cmd->result ? -EINVAL : 0;
 		if (rc)
@@ -2270,6 +2296,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 				     ms);
 	}
 
+exit:
 	if (bitmap)
 		mwl8k_enable_bsses(hw, true, bitmap);
 
@@ -2280,7 +2307,7 @@ static int mwl8k_post_cmd(struct ieee80211_hw *hw, struct mwl8k_cmd_pkt *cmd)
 
 static int mwl8k_post_pervif_cmd(struct ieee80211_hw *hw,
 				 struct ieee80211_vif *vif,
-				 struct mwl8k_cmd_pkt *cmd)
+				 struct mwl8k_cmd_pkt_hdr *cmd)
 {
 	if (vif != NULL)
 		cmd->macid = MWL8K_VIF(vif)->macid;
@@ -2332,7 +2359,7 @@ static void mwl8k_setup_5ghz_band(struct ieee80211_hw *hw)
  * CMD_GET_HW_SPEC (STA version).
  */
 struct mwl8k_cmd_get_hw_spec_sta {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__u8 hw_rev;
 	__u8 host_interface;
 	__le16 num_mcaddrs;
@@ -2481,7 +2508,7 @@ static int mwl8k_cmd_get_hw_spec_sta(struct ieee80211_hw *hw)
  * CMD_GET_HW_SPEC (AP version).
  */
 struct mwl8k_cmd_get_hw_spec_ap {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__u8 hw_rev;
 	__u8 host_interface;
 	__le16 num_wcb;
@@ -2575,7 +2602,7 @@ done:
  * CMD_SET_HW_SPEC.
  */
 struct mwl8k_cmd_set_hw_spec {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__u8 hw_rev;
 	__u8 host_interface;
 	__le16 num_mcaddrs;
@@ -2652,10 +2679,10 @@ static int mwl8k_cmd_set_hw_spec(struct ieee80211_hw *hw)
  * CMD_MAC_MULTICAST_ADR.
  */
 struct mwl8k_cmd_mac_multicast_adr {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 numaddr;
-	__u8 addr[0][ETH_ALEN];
+	__u8 addr[][ETH_ALEN];
 };
 
 #define MWL8K_ENABLE_RX_DIRECTED	0x0001
@@ -2663,7 +2690,7 @@ struct mwl8k_cmd_mac_multicast_adr {
 #define MWL8K_ENABLE_RX_ALL_MULTICAST	0x0004
 #define MWL8K_ENABLE_RX_BROADCAST	0x0008
 
-static struct mwl8k_cmd_pkt *
+static struct mwl8k_cmd_pkt_hdr *
 __mwl8k_cmd_mac_multicast_adr(struct ieee80211_hw *hw, int allmulti,
 			      struct netdev_hw_addr_list *mc_list)
 {
@@ -2700,7 +2727,7 @@ __mwl8k_cmd_mac_multicast_adr(struct ieee80211_hw *hw, int allmulti,
 		cmd->action |= cpu_to_le16(MWL8K_ENABLE_RX_MULTICAST);
 		cmd->numaddr = cpu_to_le16(mc_count);
 		netdev_hw_addr_list_for_each(ha, mc_list) {
-			memcpy(cmd->addr[i], ha->addr, ETH_ALEN);
+			memcpy(cmd->addr[i++], ha->addr, ETH_ALEN);
 		}
 	}
 
@@ -2711,7 +2738,7 @@ __mwl8k_cmd_mac_multicast_adr(struct ieee80211_hw *hw, int allmulti,
  * CMD_GET_STAT.
  */
 struct mwl8k_cmd_get_stat {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 stats[64];
 } __packed;
 
@@ -2753,7 +2780,7 @@ static int mwl8k_cmd_get_stat(struct ieee80211_hw *hw,
  * CMD_RADIO_CONTROL.
  */
 struct mwl8k_cmd_radio_control {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 control;
 	__le16 radio_on;
@@ -2814,7 +2841,7 @@ mwl8k_set_radio_preamble(struct ieee80211_hw *hw, bool short_preamble)
 #define MWL8K_RF_TX_POWER_LEVEL_TOTAL	8
 
 struct mwl8k_cmd_rf_tx_power {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 support_level;
 	__le16 current_level;
@@ -2848,7 +2875,7 @@ static int mwl8k_cmd_rf_tx_power(struct ieee80211_hw *hw, int dBm)
 #define MWL8K_TX_POWER_LEVEL_TOTAL      12
 
 struct mwl8k_cmd_tx_power {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 band;
 	__le16 channel;
@@ -2907,7 +2934,7 @@ static int mwl8k_cmd_tx_power(struct ieee80211_hw *hw,
  * CMD_RF_ANTENNA.
  */
 struct mwl8k_cmd_rf_antenna {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 antenna;
 	__le16 mode;
 } __packed;
@@ -2940,9 +2967,9 @@ mwl8k_cmd_rf_antenna(struct ieee80211_hw *hw, int antenna, int mask)
  * CMD_SET_BEACON.
  */
 struct mwl8k_cmd_set_beacon {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 beacon_len;
-	__u8 beacon[0];
+	__u8 beacon[];
 };
 
 static int mwl8k_cmd_set_beacon(struct ieee80211_hw *hw,
@@ -2970,7 +2997,7 @@ static int mwl8k_cmd_set_beacon(struct ieee80211_hw *hw,
  * CMD_SET_PRE_SCAN.
  */
 struct mwl8k_cmd_set_pre_scan {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 } __packed;
 
 static int mwl8k_cmd_set_pre_scan(struct ieee80211_hw *hw)
@@ -2995,7 +3022,7 @@ static int mwl8k_cmd_set_pre_scan(struct ieee80211_hw *hw)
  * CMD_BBP_REG_ACCESS.
  */
 struct mwl8k_cmd_bbp_reg_access {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 offset;
 	u8 value;
@@ -3036,7 +3063,7 @@ mwl8k_cmd_bbp_reg_access(struct ieee80211_hw *hw,
  * CMD_SET_POST_SCAN.
  */
 struct mwl8k_cmd_set_post_scan {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 isibss;
 	__u8 bssid[ETH_ALEN];
 } __packed;
@@ -3124,7 +3151,7 @@ static void mwl8k_update_survey(struct mwl8k_priv *priv,
  * CMD_SET_RF_CHANNEL.
  */
 struct mwl8k_cmd_set_rf_channel {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__u8 current_channel;
 	__le32 channel_flags;
@@ -3193,7 +3220,7 @@ static int mwl8k_cmd_set_rf_channel(struct ieee80211_hw *hw,
 #define MWL8K_FRAME_PROT_11N_HT_ALL			0x06
 
 struct mwl8k_cmd_update_set_aid {
-	struct	mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16	aid;
 
 	 /* AP's MAC address (BSSID) */
@@ -3232,7 +3259,7 @@ mwl8k_cmd_set_aid(struct ieee80211_hw *hw,
 
 	cmd->header.code = cpu_to_le16(MWL8K_CMD_SET_AID);
 	cmd->header.length = cpu_to_le16(sizeof(*cmd));
-	cmd->aid = cpu_to_le16(vif->bss_conf.aid);
+	cmd->aid = cpu_to_le16(vif->cfg.aid);
 	memcpy(cmd->bssid, vif->bss_conf.bssid, ETH_ALEN);
 
 	if (vif->bss_conf.use_cts_prot) {
@@ -3265,7 +3292,7 @@ mwl8k_cmd_set_aid(struct ieee80211_hw *hw,
  * CMD_SET_RATE.
  */
 struct mwl8k_cmd_set_rate {
-	struct	mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__u8	legacy_rates[14];
 
 	/* Bitmap for supported MCS codes.  */
@@ -3301,7 +3328,7 @@ mwl8k_cmd_set_rate(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 #define MWL8K_FJ_BEACON_MAXLEN	128
 
 struct mwl8k_cmd_finalize_join {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 sleep_interval;	/* Number of beacon periods to sleep */
 	__u8 beacon_data[MWL8K_FJ_BEACON_MAXLEN];
 } __packed;
@@ -3340,13 +3367,14 @@ static int mwl8k_cmd_finalize_join(struct ieee80211_hw *hw, void *frame,
  * CMD_SET_RTS_THRESHOLD.
  */
 struct mwl8k_cmd_set_rts_threshold {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 threshold;
 } __packed;
 
 static int
-mwl8k_cmd_set_rts_threshold(struct ieee80211_hw *hw, int rts_thresh)
+mwl8k_cmd_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+			    int rts_thresh)
 {
 	struct mwl8k_cmd_set_rts_threshold *cmd;
 	int rc;
@@ -3370,7 +3398,7 @@ mwl8k_cmd_set_rts_threshold(struct ieee80211_hw *hw, int rts_thresh)
  * CMD_SET_SLOT.
  */
 struct mwl8k_cmd_set_slot {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__u8 short_slot;
 } __packed;
@@ -3399,7 +3427,7 @@ static int mwl8k_cmd_set_slot(struct ieee80211_hw *hw, bool short_slot_time)
  * CMD_SET_EDCA_PARAMS.
  */
 struct mwl8k_cmd_set_edca_params {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 
 	/* See MWL8K_SET_EDCA_XXX below */
 	__le16 action;
@@ -3484,7 +3512,7 @@ mwl8k_cmd_set_edca_params(struct ieee80211_hw *hw, __u8 qnum,
  * CMD_SET_WMM_MODE.
  */
 struct mwl8k_cmd_set_wmm_mode {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 } __packed;
 
@@ -3515,7 +3543,7 @@ static int mwl8k_cmd_set_wmm_mode(struct ieee80211_hw *hw, bool enable)
  * CMD_MIMO_CONFIG.
  */
 struct mwl8k_cmd_mimo_config {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 action;
 	__u8 rx_antenna_map;
 	__u8 tx_antenna_map;
@@ -3546,7 +3574,7 @@ static int mwl8k_cmd_mimo_config(struct ieee80211_hw *hw, __u8 rx, __u8 tx)
  * CMD_USE_FIXED_RATE (STA version).
  */
 struct mwl8k_cmd_use_fixed_rate_sta {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 action;
 	__le32 allow_rate_drop;
 	__le32 num_rates;
@@ -3588,7 +3616,7 @@ static int mwl8k_cmd_use_fixed_rate_sta(struct ieee80211_hw *hw)
  * CMD_USE_FIXED_RATE (AP version).
  */
 struct mwl8k_cmd_use_fixed_rate_ap {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 action;
 	__le32 allow_rate_drop;
 	__le32 num_rates;
@@ -3629,7 +3657,7 @@ mwl8k_cmd_use_fixed_rate_ap(struct ieee80211_hw *hw, int mcast, int mgmt)
  * CMD_ENABLE_SNIFFER.
  */
 struct mwl8k_cmd_enable_sniffer {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 action;
 } __packed;
 
@@ -3653,7 +3681,7 @@ static int mwl8k_cmd_enable_sniffer(struct ieee80211_hw *hw, bool enable)
 }
 
 struct mwl8k_cmd_update_mac_addr {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	union {
 		struct {
 			__le16 mac_type;
@@ -3738,7 +3766,7 @@ static inline int mwl8k_cmd_del_mac_addr(struct ieee80211_hw *hw,
  * CMD_SET_RATEADAPT_MODE.
  */
 struct mwl8k_cmd_set_rate_adapt_mode {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 action;
 	__le16 mode;
 } __packed;
@@ -3767,7 +3795,7 @@ static int mwl8k_cmd_set_rateadapt_mode(struct ieee80211_hw *hw, __u16 mode)
  * CMD_GET_WATCHDOG_BITMAP.
  */
 struct mwl8k_cmd_get_watchdog_bitmap {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	u8	bitmap;
 } __packed;
 
@@ -3847,7 +3875,7 @@ done:
  * CMD_BSS_START.
  */
 struct mwl8k_cmd_bss_start {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le32 enable;
 } __packed;
 
@@ -3942,7 +3970,7 @@ struct mwl8k_destroy_ba_stream {
 } __packed;
 
 struct mwl8k_cmd_bastream {
-	struct mwl8k_cmd_pkt	header;
+	struct mwl8k_cmd_pkt_hdr	header;
 	__le32	action;
 	union {
 		struct mwl8k_create_ba_stream	create_params;
@@ -4009,9 +4037,9 @@ mwl8k_create_ba(struct ieee80211_hw *hw, struct mwl8k_ampdu_stream *stream,
 	cmd->create_params.reset_seq_no_flag = 1;
 
 	cmd->create_params.param_info =
-		(stream->sta->ht_cap.ampdu_factor &
+		(stream->sta->deflink.ht_cap.ampdu_factor &
 		 IEEE80211_HT_AMPDU_PARM_FACTOR) |
-		((stream->sta->ht_cap.ampdu_density << 2) &
+		((stream->sta->deflink.ht_cap.ampdu_density << 2) &
 		 IEEE80211_HT_AMPDU_PARM_DENSITY);
 
 	cmd->create_params.flags =
@@ -4052,7 +4080,7 @@ static void mwl8k_destroy_ba(struct ieee80211_hw *hw,
  * CMD_SET_NEW_STN.
  */
 struct mwl8k_cmd_set_new_stn {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 	__le16 aid;
 	__u8 mac_addr[6];
 	__le16 stn_id;
@@ -4095,18 +4123,18 @@ static int mwl8k_cmd_set_new_stn_add(struct ieee80211_hw *hw,
 	cmd->stn_id = cpu_to_le16(sta->aid);
 	cmd->action = cpu_to_le16(MWL8K_STA_ACTION_ADD);
 	if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ)
-		rates = sta->supp_rates[NL80211_BAND_2GHZ];
+		rates = sta->deflink.supp_rates[NL80211_BAND_2GHZ];
 	else
-		rates = sta->supp_rates[NL80211_BAND_5GHZ] << 5;
+		rates = sta->deflink.supp_rates[NL80211_BAND_5GHZ] << 5;
 	cmd->legacy_rates = cpu_to_le32(rates);
-	if (sta->ht_cap.ht_supported) {
-		cmd->ht_rates[0] = sta->ht_cap.mcs.rx_mask[0];
-		cmd->ht_rates[1] = sta->ht_cap.mcs.rx_mask[1];
-		cmd->ht_rates[2] = sta->ht_cap.mcs.rx_mask[2];
-		cmd->ht_rates[3] = sta->ht_cap.mcs.rx_mask[3];
-		cmd->ht_capabilities_info = cpu_to_le16(sta->ht_cap.cap);
-		cmd->mac_ht_param_info = (sta->ht_cap.ampdu_factor & 3) |
-			((sta->ht_cap.ampdu_density & 7) << 2);
+	if (sta->deflink.ht_cap.ht_supported) {
+		cmd->ht_rates[0] = sta->deflink.ht_cap.mcs.rx_mask[0];
+		cmd->ht_rates[1] = sta->deflink.ht_cap.mcs.rx_mask[1];
+		cmd->ht_rates[2] = sta->deflink.ht_cap.mcs.rx_mask[2];
+		cmd->ht_rates[3] = sta->deflink.ht_cap.mcs.rx_mask[3];
+		cmd->ht_capabilities_info = cpu_to_le16(sta->deflink.ht_cap.cap);
+		cmd->mac_ht_param_info = (sta->deflink.ht_cap.ampdu_factor & 3) |
+			((sta->deflink.ht_cap.ampdu_density & 7) << 2);
 		cmd->is_qos_sta = 1;
 	}
 
@@ -4188,7 +4216,7 @@ static int mwl8k_cmd_set_new_stn_del(struct ieee80211_hw *hw,
 #define MIC_KEY_LENGTH		8
 
 struct mwl8k_cmd_update_encryption {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 
 	__le32 action;
 	__le32 reserved;
@@ -4198,7 +4226,7 @@ struct mwl8k_cmd_update_encryption {
 } __packed;
 
 struct mwl8k_cmd_set_key {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 
 	__le32 action;
 	__le32 reserved;
@@ -4207,9 +4235,11 @@ struct mwl8k_cmd_set_key {
 	__le32 key_info;
 	__le32 key_id;
 	__le16 key_len;
-	__u8 key_material[MAX_ENCR_KEY_LENGTH];
-	__u8 tkip_tx_mic_key[MIC_KEY_LENGTH];
-	__u8 tkip_rx_mic_key[MIC_KEY_LENGTH];
+	struct {
+		__u8 key_material[MAX_ENCR_KEY_LENGTH];
+		__u8 tkip_tx_mic_key[MIC_KEY_LENGTH];
+		__u8 tkip_rx_mic_key[MIC_KEY_LENGTH];
+	} tkip;
 	__le16 tkip_rsc_low;
 	__le32 tkip_rsc_high;
 	__le16 tkip_tsc_low;
@@ -4357,7 +4387,7 @@ static int mwl8k_cmd_encryption_set_key(struct ieee80211_hw *hw,
 		goto done;
 	}
 
-	memcpy(cmd->key_material, key->key, keymlen);
+	memcpy(&cmd->tkip, key->key, keymlen);
 	cmd->action = cpu_to_le32(action);
 
 	rc = mwl8k_post_pervif_cmd(hw, vif, &cmd->header);
@@ -4484,7 +4514,7 @@ struct peer_capability_info {
 } __packed;
 
 struct mwl8k_cmd_update_stadb {
-	struct mwl8k_cmd_pkt header;
+	struct mwl8k_cmd_pkt_hdr header;
 
 	/* See STADB_ACTION_TYPE */
 	__le32	action;
@@ -4525,16 +4555,16 @@ static int mwl8k_cmd_update_stadb_add(struct ieee80211_hw *hw,
 	p = &cmd->peer_info;
 	p->peer_type = MWL8K_PEER_TYPE_ACCESSPOINT;
 	p->basic_caps = cpu_to_le16(vif->bss_conf.assoc_capability);
-	p->ht_support = sta->ht_cap.ht_supported;
-	p->ht_caps = cpu_to_le16(sta->ht_cap.cap);
-	p->extended_ht_caps = (sta->ht_cap.ampdu_factor & 3) |
-		((sta->ht_cap.ampdu_density & 7) << 2);
+	p->ht_support = sta->deflink.ht_cap.ht_supported;
+	p->ht_caps = cpu_to_le16(sta->deflink.ht_cap.cap);
+	p->extended_ht_caps = (sta->deflink.ht_cap.ampdu_factor & 3) |
+		((sta->deflink.ht_cap.ampdu_density & 7) << 2);
 	if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ)
-		rates = sta->supp_rates[NL80211_BAND_2GHZ];
+		rates = sta->deflink.supp_rates[NL80211_BAND_2GHZ];
 	else
-		rates = sta->supp_rates[NL80211_BAND_5GHZ] << 5;
+		rates = sta->deflink.supp_rates[NL80211_BAND_5GHZ] << 5;
 	legacy_rate_mask_to_array(p->legacy_rates, rates);
-	memcpy(p->ht_rates, sta->ht_cap.mcs.rx_mask, 16);
+	memcpy(p->ht_rates, &sta->deflink.ht_cap.mcs, 16);
 	p->interop = 1;
 	p->amsdu_enabled = 0;
 
@@ -4617,16 +4647,16 @@ static irqreturn_t mwl8k_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void mwl8k_tx_poll(unsigned long data)
+static void mwl8k_tx_poll(struct tasklet_struct *t)
 {
-	struct ieee80211_hw *hw = (struct ieee80211_hw *)data;
-	struct mwl8k_priv *priv = hw->priv;
+	struct mwl8k_priv *priv = from_tasklet(priv, t, poll_tx_task);
+	struct ieee80211_hw *hw = pci_get_drvdata(priv->pdev);
 	int limit;
 	int i;
 
 	limit = 32;
 
-	spin_lock_bh(&priv->tx_lock);
+	spin_lock(&priv->tx_lock);
 
 	for (i = 0; i < mwl8k_tx_queues(priv); i++)
 		limit -= mwl8k_txq_reclaim(hw, i, limit, 0);
@@ -4636,7 +4666,7 @@ static void mwl8k_tx_poll(unsigned long data)
 		priv->tx_wait = NULL;
 	}
 
-	spin_unlock_bh(&priv->tx_lock);
+	spin_unlock(&priv->tx_lock);
 
 	if (limit) {
 		writel(~MWL8K_A2H_INT_TX_DONE,
@@ -4646,10 +4676,10 @@ static void mwl8k_tx_poll(unsigned long data)
 	}
 }
 
-static void mwl8k_rx_poll(unsigned long data)
+static void mwl8k_rx_poll(struct tasklet_struct *t)
 {
-	struct ieee80211_hw *hw = (struct ieee80211_hw *)data;
-	struct mwl8k_priv *priv = hw->priv;
+	struct mwl8k_priv *priv = from_tasklet(priv, t, poll_rx_task);
+	struct ieee80211_hw *hw = pci_get_drvdata(priv->pdev);
 	int limit;
 
 	limit = 32;
@@ -4746,7 +4776,7 @@ static int mwl8k_start(struct ieee80211_hw *hw)
 	return rc;
 }
 
-static void mwl8k_stop(struct ieee80211_hw *hw)
+static void mwl8k_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct mwl8k_priv *priv = hw->priv;
 	int i;
@@ -4930,7 +4960,7 @@ fail:
 	wiphy_err(hw->wiphy, "Firmware restart failed\n");
 }
 
-static int mwl8k_config(struct ieee80211_hw *hw, u32 changed)
+static int mwl8k_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct ieee80211_conf *conf = &hw->conf;
 	struct mwl8k_priv *priv = hw->priv;
@@ -4993,13 +5023,13 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	/*
 	 * No need to capture a beacon if we're no longer associated.
 	 */
-	if ((changed & BSS_CHANGED_ASSOC) && !vif->bss_conf.assoc)
+	if ((changed & BSS_CHANGED_ASSOC) && !vif->cfg.assoc)
 		priv->capture_beacon = false;
 
 	/*
 	 * Get the AP's legacy and MCS rates.
 	 */
-	if (vif->bss_conf.assoc) {
+	if (vif->cfg.assoc) {
 		struct ieee80211_sta *ap;
 
 		rcu_read_lock();
@@ -5011,12 +5041,12 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		}
 
 		if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ) {
-			ap_legacy_rates = ap->supp_rates[NL80211_BAND_2GHZ];
+			ap_legacy_rates = ap->deflink.supp_rates[NL80211_BAND_2GHZ];
 		} else {
 			ap_legacy_rates =
-				ap->supp_rates[NL80211_BAND_5GHZ] << 5;
+				ap->deflink.supp_rates[NL80211_BAND_5GHZ] << 5;
 		}
-		memcpy(ap_mcs_rates, ap->ht_cap.mcs.rx_mask, 16);
+		memcpy(ap_mcs_rates, &ap->deflink.ht_cap.mcs, 16);
 
 		rcu_read_unlock();
 
@@ -5065,7 +5095,7 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			goto out;
 	}
 
-	if (vif->bss_conf.assoc && !priv->ap_fw &&
+	if (vif->cfg.assoc && !priv->ap_fw &&
 	    (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_ERP_CTS_PROT |
 			BSS_CHANGED_HT))) {
 		rc = mwl8k_cmd_set_aid(hw, vif, ap_legacy_rates);
@@ -5073,7 +5103,7 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			goto out;
 	}
 
-	if (vif->bss_conf.assoc &&
+	if (vif->cfg.assoc &&
 	    (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_BEACON_INT))) {
 		/*
 		 * Finalize the join.  Tell rx handler to process
@@ -5127,7 +5157,7 @@ mwl8k_bss_info_changed_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	if (changed & (BSS_CHANGED_BEACON_INT | BSS_CHANGED_BEACON)) {
 		struct sk_buff *skb;
 
-		skb = ieee80211_beacon_get(hw, vif);
+		skb = ieee80211_beacon_get(hw, vif, 0);
 		if (skb != NULL) {
 			mwl8k_cmd_set_beacon(hw, vif, skb->data, skb->len);
 			kfree_skb(skb);
@@ -5143,7 +5173,7 @@ out:
 
 static void
 mwl8k_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-		       struct ieee80211_bss_conf *info, u32 changed)
+		       struct ieee80211_bss_conf *info, u64 changed)
 {
 	if (vif->type == NL80211_IFTYPE_STATION)
 		mwl8k_bss_info_changed_sta(hw, vif, info, changed);
@@ -5154,7 +5184,7 @@ mwl8k_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 static u64 mwl8k_prepare_multicast(struct ieee80211_hw *hw,
 				   struct netdev_hw_addr_list *mc_list)
 {
-	struct mwl8k_cmd_pkt *cmd;
+	struct mwl8k_cmd_pkt_hdr *cmd;
 
 	/*
 	 * Synthesize and return a command packet that programs the
@@ -5214,7 +5244,7 @@ static void mwl8k_configure_filter(struct ieee80211_hw *hw,
 				   u64 multicast)
 {
 	struct mwl8k_priv *priv = hw->priv;
-	struct mwl8k_cmd_pkt *cmd = (void *)(unsigned long)multicast;
+	struct mwl8k_cmd_pkt_hdr *cmd = (void *)(unsigned long)multicast;
 
 	/*
 	 * AP firmware doesn't allow fine-grained control over
@@ -5296,9 +5326,10 @@ static void mwl8k_configure_filter(struct ieee80211_hw *hw,
 	mwl8k_fw_unlock(hw);
 }
 
-static int mwl8k_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
+static int mwl8k_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+				   u32 value)
 {
-	return mwl8k_cmd_set_rts_threshold(hw, value);
+	return mwl8k_cmd_set_rts_threshold(hw, radio_idx, value);
 }
 
 static int mwl8k_sta_remove(struct ieee80211_hw *hw,
@@ -5327,7 +5358,7 @@ static int mwl8k_sta_add(struct ieee80211_hw *hw,
 		ret = mwl8k_cmd_update_stadb_add(hw, vif, sta);
 		if (ret >= 0) {
 			MWL8K_STA(sta)->peer_id = ret;
-			if (sta->ht_cap.ht_supported)
+			if (sta->deflink.ht_cap.ht_supported)
 				MWL8K_STA(sta)->is_ampdu_allowed = true;
 			ret = 0;
 		}
@@ -5345,7 +5376,8 @@ static int mwl8k_sta_add(struct ieee80211_hw *hw,
 }
 
 static int mwl8k_conf_tx(struct ieee80211_hw *hw,
-			 struct ieee80211_vif *vif, u16 queue,
+			 struct ieee80211_vif *vif,
+			 unsigned int link_id, u16 queue,
 			 const struct ieee80211_tx_queue_params *params)
 {
 	struct mwl8k_priv *priv = hw->priv;
@@ -5507,7 +5539,7 @@ mwl8k_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			rc = -EBUSY;
 			break;
 		}
-		ieee80211_start_tx_ba_cb_irqsafe(vif, addr, tid);
+		rc = IEEE80211_AMPDU_TX_START_IMMEDIATE;
 		break;
 	case IEEE80211_AMPDU_TX_STOP_CONT:
 	case IEEE80211_AMPDU_TX_STOP_FLUSH:
@@ -5589,7 +5621,12 @@ static void mwl8k_sw_scan_complete(struct ieee80211_hw *hw,
 }
 
 static const struct ieee80211_ops mwl8k_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx			= mwl8k_tx,
+	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.start			= mwl8k_start,
 	.stop			= mwl8k_stop,
 	.add_interface		= mwl8k_add_interface,
@@ -5782,8 +5819,8 @@ static void mwl8k_fw_state_machine(const struct firmware *fw, void *context)
 fail:
 	priv->fw_state = FW_STATE_ERROR;
 	complete(&priv->firmware_loading_complete);
-	device_release_driver(&priv->pdev->dev);
 	mwl8k_release_firmware(priv);
+	device_release_driver(&priv->pdev->dev);
 }
 
 #define MAX_RESTART_ATTEMPTS 1
@@ -5995,7 +6032,7 @@ static int mwl8k_reload_firmware(struct ieee80211_hw *hw, char *fw_image)
 	struct mwl8k_priv *priv = hw->priv;
 	struct mwl8k_vif *vif, *tmp_vif;
 
-	mwl8k_stop(hw);
+	mwl8k_stop(hw, false);
 	mwl8k_rxq_deinit(hw, 0);
 
 	/*
@@ -6025,12 +6062,12 @@ static int mwl8k_reload_firmware(struct ieee80211_hw *hw, char *fw_image)
 	if (rc)
 		goto fail;
 
-	rc = mwl8k_config(hw, ~0);
+	rc = mwl8k_config(hw, -1, ~0);
 	if (rc)
 		goto fail;
 
 	for (i = 0; i < MWL8K_TX_WMM_QUEUES; i++) {
-		rc = mwl8k_conf_tx(hw, NULL, i, &priv->wmm_params[i]);
+		rc = mwl8k_conf_tx(hw, NULL, 0, i, &priv->wmm_params[i]);
 		if (rc)
 			goto fail;
 	}
@@ -6107,13 +6144,14 @@ static int mwl8k_firmware_load_success(struct mwl8k_priv *priv)
 	INIT_WORK(&priv->fw_reload, mwl8k_hw_restart_work);
 
 	/* TX reclaim and RX tasklets.  */
-	tasklet_init(&priv->poll_tx_task, mwl8k_tx_poll, (unsigned long)hw);
+	tasklet_setup(&priv->poll_tx_task, mwl8k_tx_poll);
 	tasklet_disable(&priv->poll_tx_task);
-	tasklet_init(&priv->poll_rx_task, mwl8k_rx_poll, (unsigned long)hw);
+	tasklet_setup(&priv->poll_rx_task, mwl8k_rx_poll);
 	tasklet_disable(&priv->poll_rx_task);
 
 	/* Power management cookie */
-	priv->cookie = pci_alloc_consistent(priv->pdev, 4, &priv->cookie_dma);
+	priv->cookie = dma_alloc_coherent(&priv->pdev->dev, 4,
+					  &priv->cookie_dma, GFP_KERNEL);
 	if (priv->cookie == NULL)
 		return -ENOMEM;
 
@@ -6161,8 +6199,8 @@ err_unprobe_hw:
 
 err_free_cookie:
 	if (priv->cookie != NULL)
-		pci_free_consistent(priv->pdev, 4,
-				priv->cookie, priv->cookie_dma);
+		dma_free_coherent(&priv->pdev->dev, 4, priv->cookie,
+				  priv->cookie_dma);
 
 	return rc;
 }
@@ -6325,7 +6363,7 @@ static void mwl8k_remove(struct pci_dev *pdev)
 
 	mwl8k_rxq_deinit(hw, 0);
 
-	pci_free_consistent(priv->pdev, 4, priv->cookie, priv->cookie_dma);
+	dma_free_coherent(&priv->pdev->dev, 4, priv->cookie, priv->cookie_dma);
 
 unmap:
 	pci_iounmap(pdev, priv->regs);

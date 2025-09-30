@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_CACHE_H
 #define __PERF_CACHE_H
 
@@ -25,6 +26,6 @@ static inline int is_absolute_path(const char *path)
 	return path[0] == '/';
 }
 
-char *mkpath(const char *fmt, ...) __printf(1, 2);
+char *mkpath(char *path_buf, size_t sz, const char *fmt, ...) __printf(3, 4);
 
 #endif /* __PERF_CACHE_H */

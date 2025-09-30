@@ -20,10 +20,9 @@
 #include <linux/firmware.h>
 #include <linux/input/mt.h>
 #include <linux/acpi.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define WDT87XX_NAME		"wdt87xx_i2c"
-#define WDT87XX_DRV_VER		"0.9.8"
 #define WDT87XX_FW_NAME		"wdt87xx_fw.bin"
 #define WDT87XX_CFG_NAME	"wdt87xx_cfg.bin"
 
@@ -888,7 +887,7 @@ static ssize_t config_csum_show(struct device *dev,
 	cfg_csum = wdt->param.xmls_id1;
 	cfg_csum = (cfg_csum << 16) | wdt->param.xmls_id2;
 
-	return scnprintf(buf, PAGE_SIZE, "%x\n", cfg_csum);
+	return sysfs_emit(buf, "%x\n", cfg_csum);
 }
 
 static ssize_t fw_version_show(struct device *dev,
@@ -897,7 +896,7 @@ static ssize_t fw_version_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct wdt87xx_data *wdt = i2c_get_clientdata(client);
 
-	return scnprintf(buf, PAGE_SIZE, "%x\n", wdt->param.fw_id);
+	return sysfs_emit(buf, "%x\n", wdt->param.fw_id);
 }
 
 static ssize_t plat_id_show(struct device *dev,
@@ -906,7 +905,7 @@ static ssize_t plat_id_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct wdt87xx_data *wdt = i2c_get_clientdata(client);
 
-	return scnprintf(buf, PAGE_SIZE, "%x\n", wdt->param.plat_id);
+	return sysfs_emit(buf, "%x\n", wdt->param.plat_id);
 }
 
 static ssize_t update_config_store(struct device *dev,
@@ -945,10 +944,7 @@ static struct attribute *wdt87xx_attrs[] = {
 	&dev_attr_update_fw.attr,
 	NULL
 };
-
-static const struct attribute_group wdt87xx_attr_group = {
-	.attrs = wdt87xx_attrs,
-};
+ATTRIBUTE_GROUPS(wdt87xx);
 
 static void wdt87xx_report_contact(struct input_dev *input,
 				   struct wdt87xx_sys_param *param,
@@ -1065,8 +1061,7 @@ static int wdt87xx_ts_create_input_device(struct wdt87xx_data *wdt)
 	return 0;
 }
 
-static int wdt87xx_ts_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int wdt87xx_ts_probe(struct i2c_client *client)
 {
 	struct wdt87xx_data *wdt;
 	int error;
@@ -1106,23 +1101,10 @@ static int wdt87xx_ts_probe(struct i2c_client *client,
 		return error;
 	}
 
-	error = sysfs_create_group(&client->dev.kobj, &wdt87xx_attr_group);
-	if (error) {
-		dev_err(&client->dev, "create sysfs failed: %d\n", error);
-		return error;
-	}
-
 	return 0;
 }
 
-static int wdt87xx_ts_remove(struct i2c_client *client)
-{
-	sysfs_remove_group(&client->dev.kobj, &wdt87xx_attr_group);
-
-	return 0;
-}
-
-static int __maybe_unused wdt87xx_suspend(struct device *dev)
+static int wdt87xx_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	int error;
@@ -1141,7 +1123,7 @@ static int __maybe_unused wdt87xx_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused wdt87xx_resume(struct device *dev)
+static int wdt87xx_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	int error;
@@ -1150,7 +1132,7 @@ static int __maybe_unused wdt87xx_resume(struct device *dev)
 	 * The chip may have been reset while system is resuming,
 	 * give it some time to settle.
 	 */
-	mdelay(100);
+	msleep(100);
 
 	error = wdt87xx_send_command(client, VND_CMD_START, 0);
 	if (error)
@@ -1163,27 +1145,29 @@ static int __maybe_unused wdt87xx_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(wdt87xx_pm_ops, wdt87xx_suspend, wdt87xx_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(wdt87xx_pm_ops, wdt87xx_suspend, wdt87xx_resume);
 
 static const struct i2c_device_id wdt87xx_dev_id[] = {
-	{ WDT87XX_NAME, 0 },
+	{ WDT87XX_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wdt87xx_dev_id);
 
+#ifdef CONFIG_ACPI
 static const struct acpi_device_id wdt87xx_acpi_id[] = {
 	{ "WDHT0001", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, wdt87xx_acpi_id);
+#endif
 
 static struct i2c_driver wdt87xx_driver = {
 	.probe		= wdt87xx_ts_probe,
-	.remove		= wdt87xx_ts_remove,
 	.id_table	= wdt87xx_dev_id,
 	.driver	= {
-		.name	= WDT87XX_NAME,
-		.pm     = &wdt87xx_pm_ops,
+		.name = WDT87XX_NAME,
+		.dev_groups = wdt87xx_groups,
+		.pm = pm_sleep_ptr(&wdt87xx_pm_ops),
 		.acpi_match_table = ACPI_PTR(wdt87xx_acpi_id),
 	},
 };
@@ -1191,5 +1175,4 @@ module_i2c_driver(wdt87xx_driver);
 
 MODULE_AUTHOR("HN Chen <hn.chen@weidahitech.com>");
 MODULE_DESCRIPTION("WeidaHiTech WDT87XX Touchscreen driver");
-MODULE_VERSION(WDT87XX_DRV_VER);
 MODULE_LICENSE("GPL");

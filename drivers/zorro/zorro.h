@@ -1,3 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+
+    /*
+     *  Zorro bus
+     */
+
+extern const struct bus_type zorro_bus_type;
+
 
 #ifdef CONFIG_ZORRO_NAMES
 extern void zorro_name_device(struct zorro_dev *z);

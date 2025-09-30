@@ -1,4 +1,6 @@
 /* Copyright (c) 2013 Coraid, Inc.  See COPYING for GPL terms. */
+#include <linux/blk-mq.h>
+
 #define VERSION "85"
 #define AOE_MAJOR 152
 #define DEVICE_NAME "aoe"
@@ -78,6 +80,7 @@ enum {
 	DEVFL_NEWSIZE = (1<<6),	/* need to update dev size in block layer */
 	DEVFL_FREEING = (1<<7),	/* set when device is being cleaned up */
 	DEVFL_FREED = (1<<8),	/* device has been cleaned up */
+	DEVFL_DEAD = (1<<9),	/* device has timed out of aoe_deadsecs */
 };
 
 enum {
@@ -98,6 +101,10 @@ enum {
 	MAX_TAINT = 1000,	/* cap on aoetgt taint */
 };
 
+struct aoe_req {
+	unsigned long nr_bios;
+};
+
 struct buf {
 	ulong nframesout;
 	struct bio *bio;
@@ -112,8 +119,7 @@ enum frame_flags {
 struct frame {
 	struct list_head head;
 	u32 tag;
-	struct timeval sent;	/* high-res time packet was sent */
-	u32 sent_jiffs;		/* low-res jiffies-based sent time */
+	ktime_t sent;			/* high-res time packet was sent */
 	ulong waited;
 	ulong waited_total;
 	struct aoetgt *t;		/* parent target I belong to */
@@ -165,6 +171,8 @@ struct aoedev {
 	struct gendisk *gd;
 	struct dentry *debugfs;
 	struct request_queue *blkq;
+	struct list_head rq_list;
+	struct blk_mq_tag_set tag_set;
 	struct hd_geometry geo;
 	sector_t ssize;
 	struct timer_list timer;
@@ -202,7 +210,6 @@ int aoeblk_init(void);
 void aoeblk_exit(void);
 void aoeblk_gdalloc(void *);
 void aoedisk_rm_debugfs(struct aoedev *d);
-void aoedisk_rm_sysfs(struct aoedev *d);
 
 int aoechr_init(void);
 void aoechr_exit(void);
@@ -238,3 +245,5 @@ void aoenet_exit(void);
 void aoenet_xmit(struct sk_buff_head *);
 int is_aoe_netif(struct net_device *ifp);
 int set_aoe_iflist(const char __user *str, size_t size);
+
+extern struct workqueue_struct *aoe_wq;

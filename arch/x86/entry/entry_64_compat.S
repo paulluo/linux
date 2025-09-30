@@ -1,20 +1,22 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Compatibility mode system call entry point for x86-64.
  *
  * Copyright 2000-2002 Andi Kleen, SuSE Labs.
  */
-#include "calling.h"
 #include <asm/asm-offsets.h>
 #include <asm/current.h>
 #include <asm/errno.h>
-#include <asm/ia32_unistd.h>
 #include <asm/thread_info.h>
 #include <asm/segment.h>
 #include <asm/irqflags.h>
 #include <asm/asm.h>
 #include <asm/smap.h>
+#include <asm/nospec-branch.h>
 #include <linux/linkage.h>
 #include <linux/err.h>
+
+#include "calling.h"
 
 	.section .entry.text, "ax"
 
@@ -45,10 +47,32 @@
  * ebp  user stack
  * 0(%ebp) arg6
  */
-ENTRY(entry_SYSENTER_compat)
+SYM_CODE_START(entry_SYSENTER_compat)
+	UNWIND_HINT_ENTRY
+	ENDBR
 	/* Interrupts are off on entry. */
-	SWAPGS_UNSAFE_STACK
+	swapgs
+
+	pushq	%rax
+	SWITCH_TO_KERNEL_CR3 scratch_reg=%rax
+	popq	%rax
+
 	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp
+
+	/* Construct struct pt_regs on stack */
+	pushq	$__USER_DS		/* pt_regs->ss */
+	pushq	$0			/* pt_regs->sp = 0 (placeholder) */
+
+	/*
+	 * Push flags.  This is nasty.  First, interrupts are currently
+	 * off, but we need pt_regs->flags to have IF set.  Second, if TS
+	 * was set in usermode, it's still set, and we're singlestepping
+	 * through this code.  do_SYSENTER_32() will fix up IF.
+	 */
+	pushfq				/* pt_regs->flags (except IF = 0) */
+	pushq	$__USER32_CS		/* pt_regs->cs */
+	pushq	$0			/* pt_regs->ip = 0 (placeholder) */
+SYM_INNER_LABEL(entry_SYSENTER_compat_after_hwframe, SYM_L_GLOBAL)
 
 	/*
 	 * User tracing code (ptrace or signal handlers) might assume that
@@ -59,36 +83,10 @@ ENTRY(entry_SYSENTER_compat)
 	 */
 	movl	%eax, %eax
 
-	/* Construct struct pt_regs on stack */
-	pushq	$__USER32_DS		/* pt_regs->ss */
-	pushq	%rbp			/* pt_regs->sp (stashed in bp) */
-
-	/*
-	 * Push flags.  This is nasty.  First, interrupts are currently
-	 * off, but we need pt_regs->flags to have IF set.  Second, even
-	 * if TF was set when SYSENTER started, it's clear by now.  We fix
-	 * that later using TIF_SINGLESTEP.
-	 */
-	pushfq				/* pt_regs->flags (except IF = 0) */
-	orl	$X86_EFLAGS_IF, (%rsp)	/* Fix saved flags */
-	pushq	$__USER32_CS		/* pt_regs->cs */
-	pushq	$0			/* pt_regs->ip = 0 (placeholder) */
 	pushq	%rax			/* pt_regs->orig_ax */
-	pushq	%rdi			/* pt_regs->di */
-	pushq	%rsi			/* pt_regs->si */
-	pushq	%rdx			/* pt_regs->dx */
-	pushq	%rcx			/* pt_regs->cx */
-	pushq	$-ENOSYS		/* pt_regs->ax */
-	pushq   $0			/* pt_regs->r8  = 0 */
-	pushq   $0			/* pt_regs->r9  = 0 */
-	pushq   $0			/* pt_regs->r10 = 0 */
-	pushq   $0			/* pt_regs->r11 = 0 */
-	pushq   %rbx                    /* pt_regs->rbx */
-	pushq   %rbp                    /* pt_regs->rbp (will be overwritten) */
-	pushq   $0			/* pt_regs->r12 = 0 */
-	pushq   $0			/* pt_regs->r13 = 0 */
-	pushq   $0			/* pt_regs->r14 = 0 */
-	pushq   $0			/* pt_regs->r15 = 0 */
+	PUSH_AND_CLEAR_REGS rax=$-ENOSYS
+	UNWIND_HINT_REGS
+
 	cld
 
 	/*
@@ -115,24 +113,25 @@ ENTRY(entry_SYSENTER_compat)
 .Lsysenter_flags_fixed:
 
 	/*
-	 * User mode is traced as though IRQs are on, and SYSENTER
-	 * turned them off.
+	 * CPU bugs mitigations mechanisms can call other functions. They
+	 * should be invoked after making sure TF is cleared because
+	 * single-step is ignored only for instructions inside the
+	 * entry_SYSENTER_compat function.
 	 */
-	TRACE_IRQS_OFF
+	IBRS_ENTER
+	UNTRAIN_RET
+	CLEAR_BRANCH_HISTORY
 
 	movq	%rsp, %rdi
-	call	do_fast_syscall_32
-	/* XEN PV guests always use IRET path */
-	ALTERNATIVE "testl %eax, %eax; jz .Lsyscall_32_done", \
-		    "jmp .Lsyscall_32_done", X86_FEATURE_XENPV
+	call	do_SYSENTER_32
 	jmp	sysret32_from_system_call
 
 .Lsysenter_fix_flags:
 	pushq	$X86_EFLAGS_FIXED
 	popfq
 	jmp	.Lsysenter_flags_fixed
-GLOBAL(__end_entry_SYSENTER_compat)
-ENDPROC(entry_SYSENTER_compat)
+SYM_INNER_LABEL(__end_entry_SYSENTER_compat, SYM_L_GLOBAL)
+SYM_CODE_END(entry_SYSENTER_compat)
 
 /*
  * 32-bit SYSCALL entry.
@@ -181,54 +180,58 @@ ENDPROC(entry_SYSENTER_compat)
  * esp  user stack
  * 0(%esp) arg6
  */
-ENTRY(entry_SYSCALL_compat)
+SYM_CODE_START(entry_SYSCALL_compat)
+	UNWIND_HINT_ENTRY
+	ENDBR
 	/* Interrupts are off on entry. */
 	swapgs
 
-	/* Stash user ESP and switch to the kernel stack. */
+	/* Stash user ESP */
 	movl	%esp, %r8d
+
+	/* Use %rsp as scratch reg. User ESP is stashed in r8 */
+	SWITCH_TO_KERNEL_CR3 scratch_reg=%rsp
+
+	/* Switch to the kernel stack */
 	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp
 
+SYM_INNER_LABEL(entry_SYSCALL_compat_safe_stack, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
+
 	/* Construct struct pt_regs on stack */
-	pushq	$__USER32_DS		/* pt_regs->ss */
+	pushq	$__USER_DS		/* pt_regs->ss */
 	pushq	%r8			/* pt_regs->sp */
 	pushq	%r11			/* pt_regs->flags */
 	pushq	$__USER32_CS		/* pt_regs->cs */
 	pushq	%rcx			/* pt_regs->ip */
-GLOBAL(entry_SYSCALL_compat_after_hwframe)
+SYM_INNER_LABEL(entry_SYSCALL_compat_after_hwframe, SYM_L_GLOBAL)
 	movl	%eax, %eax		/* discard orig_ax high bits */
 	pushq	%rax			/* pt_regs->orig_ax */
-	pushq	%rdi			/* pt_regs->di */
-	pushq	%rsi			/* pt_regs->si */
-	pushq	%rdx			/* pt_regs->dx */
-	pushq	%rbp			/* pt_regs->cx (stashed in bp) */
-	pushq	$-ENOSYS		/* pt_regs->ax */
-	pushq   $0			/* pt_regs->r8  = 0 */
-	pushq   $0			/* pt_regs->r9  = 0 */
-	pushq   $0			/* pt_regs->r10 = 0 */
-	pushq   $0			/* pt_regs->r11 = 0 */
-	pushq   %rbx                    /* pt_regs->rbx */
-	pushq   %rbp                    /* pt_regs->rbp (will be overwritten) */
-	pushq   $0			/* pt_regs->r12 = 0 */
-	pushq   $0			/* pt_regs->r13 = 0 */
-	pushq   $0			/* pt_regs->r14 = 0 */
-	pushq   $0			/* pt_regs->r15 = 0 */
+	PUSH_AND_CLEAR_REGS rcx=%rbp rax=$-ENOSYS
+	UNWIND_HINT_REGS
 
-	/*
-	 * User mode is traced as though IRQs are on, and SYSENTER
-	 * turned them off.
-	 */
-	TRACE_IRQS_OFF
+	IBRS_ENTER
+	UNTRAIN_RET
+	CLEAR_BRANCH_HISTORY
 
 	movq	%rsp, %rdi
 	call	do_fast_syscall_32
-	/* XEN PV guests always use IRET path */
-	ALTERNATIVE "testl %eax, %eax; jz .Lsyscall_32_done", \
-		    "jmp .Lsyscall_32_done", X86_FEATURE_XENPV
 
-	/* Opportunistic SYSRET */
 sysret32_from_system_call:
-	TRACE_IRQS_ON			/* User mode traces as IRQs on. */
+	/* XEN PV guests always use IRET path */
+	ALTERNATIVE "testb %al, %al; jz swapgs_restore_regs_and_return_to_usermode", \
+		    "jmp swapgs_restore_regs_and_return_to_usermode", X86_FEATURE_XENPV
+
+	/*
+	 * Opportunistic SYSRET
+	 *
+	 * We are not going to return to userspace from the trampoline
+	 * stack. So let's erase the thread stack right now.
+	 */
+	STACKLEAK_ERASE
+
+	IBRS_EXIT
+
 	movq	RBX(%rsp), %rbx		/* pt_regs->rbx */
 	movq	RBP(%rsp), %rbp		/* pt_regs->rbp */
 	movq	EFLAGS(%rsp), %r11	/* pt_regs->flags (in r11) */
@@ -255,99 +258,42 @@ sysret32_from_system_call:
 	 * when the system call started, which is already known to user
 	 * code.  We zero R8-R10 to avoid info leaks.
          */
-	xorq	%r8, %r8
-	xorq	%r9, %r9
-	xorq	%r10, %r10
 	movq	RSP-ORIG_RAX(%rsp), %rsp
+SYM_INNER_LABEL(entry_SYSRETL_compat_unsafe_stack, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
+
+	/*
+	 * The original userspace %rsp (RSP-ORIG_RAX(%rsp)) is stored
+	 * on the process stack which is not mapped to userspace and
+	 * not readable after we SWITCH_TO_USER_CR3.  Delay the CR3
+	 * switch until after after the last reference to the process
+	 * stack.
+	 *
+	 * %r8/%r9 are zeroed before the sysret, thus safe to clobber.
+	 */
+	SWITCH_TO_USER_CR3_NOSTACK scratch_reg=%r8 scratch_reg2=%r9
+
+	xorl	%r8d, %r8d
+	xorl	%r9d, %r9d
+	xorl	%r10d, %r10d
 	swapgs
+	CLEAR_CPU_BUFFERS
 	sysretl
-END(entry_SYSCALL_compat)
+SYM_INNER_LABEL(entry_SYSRETL_compat_end, SYM_L_GLOBAL)
+	ANNOTATE_NOENDBR
+	int3
+SYM_CODE_END(entry_SYSCALL_compat)
 
 /*
- * 32-bit legacy system call entry.
- *
- * 32-bit x86 Linux system calls traditionally used the INT $0x80
- * instruction.  INT $0x80 lands here.
- *
- * This entry point can be used by 32-bit and 64-bit programs to perform
- * 32-bit system calls.  Instances of INT $0x80 can be found inline in
- * various programs and libraries.  It is also used by the vDSO's
- * __kernel_vsyscall fallback for hardware that doesn't support a faster
- * entry method.  Restarted 32-bit system calls also fall back to INT
- * $0x80 regardless of what instruction was originally used to do the
- * system call.
- *
- * This is considered a slow path.  It is not used by most libc
- * implementations on modern hardware except during process startup.
- *
- * Arguments:
- * eax  system call number
- * ebx  arg1
- * ecx  arg2
- * edx  arg3
- * esi  arg4
- * edi  arg5
- * ebp  arg6
+ * int 0x80 is used by 32 bit mode as a system call entry. Normally idt entries
+ * point to C routines, however since this is a system call interface the branch
+ * history needs to be scrubbed to protect against BHI attacks, and that
+ * scrubbing needs to take place in assembly code prior to entering any C
+ * routines.
  */
-ENTRY(entry_INT80_compat)
-	/*
-	 * Interrupts are off on entry.
-	 */
-	ASM_CLAC			/* Do this early to minimize exposure */
-	SWAPGS
-
-	/*
-	 * User tracing code (ptrace or signal handlers) might assume that
-	 * the saved RAX contains a 32-bit number when we're invoking a 32-bit
-	 * syscall.  Just in case the high bits are nonzero, zero-extend
-	 * the syscall number.  (This could almost certainly be deleted
-	 * with no ill effects.)
-	 */
-	movl	%eax, %eax
-
-	/* Construct struct pt_regs on stack (iret frame is already on stack) */
-	pushq	%rax			/* pt_regs->orig_ax */
-	pushq	%rdi			/* pt_regs->di */
-	pushq	%rsi			/* pt_regs->si */
-	pushq	%rdx			/* pt_regs->dx */
-	pushq	%rcx			/* pt_regs->cx */
-	pushq	$-ENOSYS		/* pt_regs->ax */
-	pushq   $0			/* pt_regs->r8  = 0 */
-	pushq   $0			/* pt_regs->r9  = 0 */
-	pushq   $0			/* pt_regs->r10 = 0 */
-	pushq   $0			/* pt_regs->r11 = 0 */
-	pushq   %rbx                    /* pt_regs->rbx */
-	pushq   %rbp                    /* pt_regs->rbp */
-	pushq   %r12                    /* pt_regs->r12 */
-	pushq   %r13                    /* pt_regs->r13 */
-	pushq   %r14                    /* pt_regs->r14 */
-	pushq   %r15                    /* pt_regs->r15 */
-	cld
-
-	/*
-	 * User mode is traced as though IRQs are on, and the interrupt
-	 * gate turned them off.
-	 */
-	TRACE_IRQS_OFF
-
-	movq	%rsp, %rdi
-	call	do_int80_syscall_32
-.Lsyscall_32_done:
-
-	/* Go back to user mode. */
-	TRACE_IRQS_ON
-	SWAPGS
-	jmp	restore_regs_and_iret
-END(entry_INT80_compat)
-
-ENTRY(stub32_clone)
-	/*
-	 * The 32-bit clone ABI is: clone(..., int tls_val, int *child_tidptr).
-	 * The 64-bit clone ABI is: clone(..., int *child_tidptr, int tls_val).
-	 *
-	 * The native 64-bit kernel's sys_clone() implements the latter,
-	 * so we need to swap arguments here before calling it:
-	 */
-	xchg	%r8, %rcx
-	jmp	sys_clone
-ENDPROC(stub32_clone)
+SYM_CODE_START(int80_emulation)
+	ANNOTATE_NOENDBR
+	UNWIND_HINT_FUNC
+	CLEAR_BRANCH_HISTORY
+	jmp do_int80_emulation
+SYM_CODE_END(int80_emulation)

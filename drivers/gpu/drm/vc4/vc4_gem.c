@@ -27,6 +27,10 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/sched/signal.h>
+#include <linux/dma-fence-array.h>
+
+#include <drm/drm_exec.h>
+#include <drm/drm_syncobj.h>
 
 #include "uapi/drm/vc4_drm.h"
 #include "vc4_drv.h"
@@ -55,7 +59,7 @@ vc4_free_hang_state(struct drm_device *dev, struct vc4_hang_state *state)
 	unsigned int i;
 
 	for (i = 0; i < state->user_state.bo_count; i++)
-		drm_gem_object_put_unlocked(state->bo[i]);
+		drm_gem_object_put(state->bo[i]);
 
 	kfree(state);
 }
@@ -72,6 +76,14 @@ vc4_get_hang_state_ioctl(struct drm_device *dev, void *data,
 	unsigned long irqflags;
 	u32 i;
 	int ret = 0;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
+
+	if (!vc4->v3d) {
+		DRM_DEBUG("VC4_GET_HANG_STATE with no VC4 V3D probed\n");
+		return -ENODEV;
+	}
 
 	spin_lock_irqsave(&vc4->job_lock, irqflags);
 	kernel_state = vc4->hang_state;
@@ -115,7 +127,7 @@ vc4_get_hang_state_ioctl(struct drm_device *dev, void *data,
 			goto err_delete_handle;
 		}
 		bo_state[i].handle = handle;
-		bo_state[i].paddr = vc4_bo->base.paddr;
+		bo_state[i].paddr = vc4_bo->base.dma_addr;
 		bo_state[i].size = vc4_bo->base.base.size;
 	}
 
@@ -146,7 +158,7 @@ vc4_save_hang_state(struct drm_device *dev)
 	struct vc4_exec_info *exec[2];
 	struct vc4_bo *bo;
 	unsigned long irqflags;
-	unsigned int i, j, unref_list_count, prev_idx;
+	unsigned int i, j, k, unref_list_count;
 
 	kernel_state = kcalloc(1, sizeof(*kernel_state), GFP_KERNEL);
 	if (!kernel_state)
@@ -182,23 +194,34 @@ vc4_save_hang_state(struct drm_device *dev)
 		return;
 	}
 
-	prev_idx = 0;
+	k = 0;
 	for (i = 0; i < 2; i++) {
 		if (!exec[i])
 			continue;
 
 		for (j = 0; j < exec[i]->bo_count; j++) {
-			drm_gem_object_get(&exec[i]->bo[j]->base);
-			kernel_state->bo[j + prev_idx] = &exec[i]->bo[j]->base;
+			bo = to_vc4_bo(exec[i]->bo[j]);
+
+			/* Retain BOs just in case they were marked purgeable.
+			 * This prevents the BO from being purged before
+			 * someone had a chance to dump the hang state.
+			 */
+			WARN_ON(!refcount_read(&bo->usecnt));
+			refcount_inc(&bo->usecnt);
+			drm_gem_object_get(exec[i]->bo[j]);
+			kernel_state->bo[k++] = exec[i]->bo[j];
 		}
 
 		list_for_each_entry(bo, &exec[i]->unref_list, unref_head) {
+			/* No need to retain BOs coming from the ->unref_list
+			 * because they are naturally unpurgeable.
+			 */
 			drm_gem_object_get(&bo->base.base);
-			kernel_state->bo[j + prev_idx] = &bo->base.base;
-			j++;
+			kernel_state->bo[k++] = &bo->base.base;
 		}
-		prev_idx = j + 1;
 	}
+
+	WARN_ON_ONCE(k != state->bo_count);
 
 	if (exec[0])
 		state->start_bin = exec[0]->ct0ca;
@@ -232,6 +255,26 @@ vc4_save_hang_state(struct drm_device *dev)
 	state->fdbgr = V3D_READ(V3D_FDBGR);
 	state->fdbgs = V3D_READ(V3D_FDBGS);
 	state->errstat = V3D_READ(V3D_ERRSTAT);
+
+	/* We need to turn purgeable BOs into unpurgeable ones so that
+	 * userspace has a chance to dump the hang state before the kernel
+	 * decides to purge those BOs.
+	 * Note that BO consistency at dump time cannot be guaranteed. For
+	 * example, if the owner of these BOs decides to re-use them or mark
+	 * them purgeable again there's nothing we can do to prevent it.
+	 */
+	for (i = 0; i < kernel_state->user_state.bo_count; i++) {
+		struct vc4_bo *bo = to_vc4_bo(kernel_state->bo[i]);
+
+		if (bo->madv == __VC4_MADV_NOTSUPP)
+			continue;
+
+		mutex_lock(&bo->madv_lock);
+		if (!WARN_ON(bo->madv == __VC4_MADV_PURGED))
+			bo->madv = VC4_MADV_WILLNEED;
+		refcount_dec(&bo->usecnt);
+		mutex_unlock(&bo->madv_lock);
+	}
 
 	spin_lock_irqsave(&vc4->job_lock, irqflags);
 	if (vc4->hang_state) {
@@ -275,16 +318,16 @@ vc4_reset_work(struct work_struct *work)
 	struct vc4_dev *vc4 =
 		container_of(work, struct vc4_dev, hangcheck.reset_work);
 
-	vc4_save_hang_state(vc4->dev);
+	vc4_save_hang_state(&vc4->base);
 
-	vc4_reset(vc4->dev);
+	vc4_reset(&vc4->base);
 }
 
 static void
-vc4_hangcheck_elapsed(unsigned long data)
+vc4_hangcheck_elapsed(struct timer_list *t)
 {
-	struct drm_device *dev = (struct drm_device *)data;
-	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	struct vc4_dev *vc4 = timer_container_of(vc4, t, hangcheck.timer);
+	struct drm_device *dev = &vc4->base;
 	uint32_t ct0ca, ct1ca;
 	unsigned long irqflags;
 	struct vc4_exec_info *bin_exec, *render_exec;
@@ -347,6 +390,9 @@ vc4_wait_for_seqno(struct drm_device *dev, uint64_t seqno, uint64_t timeout_ns,
 	unsigned long timeout_expire;
 	DEFINE_WAIT(wait);
 
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
+
 	if (vc4->finished_seqno >= seqno)
 		return 0;
 
@@ -405,6 +451,19 @@ vc4_flush_caches(struct drm_device *dev)
 		  VC4_SET_FIELD(0xf, V3D_SLCACTL_ICC));
 }
 
+static void
+vc4_flush_texture_caches(struct drm_device *dev)
+{
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
+
+	V3D_WRITE(V3D_L2CACTL,
+		  V3D_L2CACTL_L2CCLR);
+
+	V3D_WRITE(V3D_SLCACTL,
+		  VC4_SET_FIELD(0xf, V3D_SLCACTL_T1CC) |
+		  VC4_SET_FIELD(0xf, V3D_SLCACTL_T0CC));
+}
+
 /* Sets the registers for the next job to be actually be executed in
  * the hardware.
  *
@@ -416,6 +475,9 @@ vc4_submit_next_bin_job(struct drm_device *dev)
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	struct vc4_exec_info *exec;
 
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return;
+
 again:
 	exec = vc4_first_bin_job(vc4);
 	if (!exec)
@@ -423,14 +485,32 @@ again:
 
 	vc4_flush_caches(dev);
 
+	/* Only start the perfmon if it was not already started by a previous
+	 * job.
+	 */
+	if (exec->perfmon && vc4->active_perfmon != exec->perfmon)
+		vc4_perfmon_start(vc4, exec->perfmon);
+
 	/* Either put the job in the binner if it uses the binner, or
 	 * immediately move it to the to-be-rendered queue.
 	 */
 	if (exec->ct0ca != exec->ct0ea) {
+		trace_vc4_submit_cl(dev, false, exec->seqno, exec->ct0ca,
+				    exec->ct0ea);
 		submit_cl(dev, 0, exec->ct0ca, exec->ct0ea);
 	} else {
+		struct vc4_exec_info *next;
+
 		vc4_move_job_to_render(dev, exec);
-		goto again;
+		next = vc4_first_bin_job(vc4);
+
+		/* We can't start the next bin job if the previous job had a
+		 * different perfmon instance attached to it. The same goes
+		 * if one of them had a perfmon attached to it and the other
+		 * one doesn't.
+		 */
+		if (next && next->perfmon == exec->perfmon)
+			goto again;
 	}
 }
 
@@ -443,6 +523,18 @@ vc4_submit_next_render_job(struct drm_device *dev)
 	if (!exec)
 		return;
 
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return;
+
+	/* A previous RCL may have written to one of our textures, and
+	 * our full cache flush at bin time may have occurred before
+	 * that RCL completed.  Flush the texture cache now, but not
+	 * the instructions or uniforms (since we don't write those
+	 * from an RCL).
+	 */
+	vc4_flush_texture_caches(dev);
+
+	trace_vc4_submit_cl(dev, true, exec->seqno, exec->ct1ca, exec->ct1ea);
 	submit_cl(dev, 1, exec->ct1ca, exec->ct1ea);
 }
 
@@ -452,50 +544,31 @@ vc4_move_job_to_render(struct drm_device *dev, struct vc4_exec_info *exec)
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	bool was_empty = list_empty(&vc4->render_job_list);
 
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return;
+
 	list_move_tail(&exec->head, &vc4->render_job_list);
 	if (was_empty)
 		vc4_submit_next_render_job(dev);
 }
 
 static void
-vc4_update_bo_seqnos(struct vc4_exec_info *exec, uint64_t seqno)
+vc4_attach_fences(struct vc4_exec_info *exec)
 {
 	struct vc4_bo *bo;
 	unsigned i;
 
 	for (i = 0; i < exec->bo_count; i++) {
-		bo = to_vc4_bo(&exec->bo[i]->base);
-		bo->seqno = seqno;
-
-		reservation_object_add_shared_fence(bo->resv, exec->fence);
-	}
-
-	list_for_each_entry(bo, &exec->unref_list, unref_head) {
-		bo->seqno = seqno;
+		bo = to_vc4_bo(exec->bo[i]);
+		dma_resv_add_fence(bo->base.base.resv, exec->fence,
+				   DMA_RESV_USAGE_READ);
 	}
 
 	for (i = 0; i < exec->rcl_write_bo_count; i++) {
 		bo = to_vc4_bo(&exec->rcl_write_bo[i]->base);
-		bo->write_seqno = seqno;
-
-		reservation_object_add_excl_fence(bo->resv, exec->fence);
+		dma_resv_add_fence(bo->base.base.resv, exec->fence,
+				   DMA_RESV_USAGE_WRITE);
 	}
-}
-
-static void
-vc4_unlock_bo_reservations(struct drm_device *dev,
-			   struct vc4_exec_info *exec,
-			   struct ww_acquire_ctx *acquire_ctx)
-{
-	int i;
-
-	for (i = 0; i < exec->bo_count; i++) {
-		struct vc4_bo *bo = to_vc4_bo(&exec->bo[i]->base);
-
-		ww_mutex_unlock(&bo->resv->lock);
-	}
-
-	ww_acquire_fini(acquire_ctx);
 }
 
 /* Takes the reservation lock on all the BOs being referenced, so that
@@ -506,71 +579,23 @@ vc4_unlock_bo_reservations(struct drm_device *dev,
  * to vc4, so we don't attach dma-buf fences to them.
  */
 static int
-vc4_lock_bo_reservations(struct drm_device *dev,
-			 struct vc4_exec_info *exec,
-			 struct ww_acquire_ctx *acquire_ctx)
+vc4_lock_bo_reservations(struct vc4_exec_info *exec,
+			 struct drm_exec *exec_ctx)
 {
-	int contended_lock = -1;
-	int i, ret;
-	struct vc4_bo *bo;
-
-	ww_acquire_init(acquire_ctx, &reservation_ww_class);
-
-retry:
-	if (contended_lock != -1) {
-		bo = to_vc4_bo(&exec->bo[contended_lock]->base);
-		ret = ww_mutex_lock_slow_interruptible(&bo->resv->lock,
-						       acquire_ctx);
-		if (ret) {
-			ww_acquire_done(acquire_ctx);
-			return ret;
-		}
-	}
-
-	for (i = 0; i < exec->bo_count; i++) {
-		if (i == contended_lock)
-			continue;
-
-		bo = to_vc4_bo(&exec->bo[i]->base);
-
-		ret = ww_mutex_lock_interruptible(&bo->resv->lock, acquire_ctx);
-		if (ret) {
-			int j;
-
-			for (j = 0; j < i; j++) {
-				bo = to_vc4_bo(&exec->bo[j]->base);
-				ww_mutex_unlock(&bo->resv->lock);
-			}
-
-			if (contended_lock != -1 && contended_lock >= i) {
-				bo = to_vc4_bo(&exec->bo[contended_lock]->base);
-
-				ww_mutex_unlock(&bo->resv->lock);
-			}
-
-			if (ret == -EDEADLK) {
-				contended_lock = i;
-				goto retry;
-			}
-
-			ww_acquire_done(acquire_ctx);
-			return ret;
-		}
-	}
-
-	ww_acquire_done(acquire_ctx);
+	int ret;
 
 	/* Reserve space for our shared (read-only) fence references,
 	 * before we commit the CL to the hardware.
 	 */
-	for (i = 0; i < exec->bo_count; i++) {
-		bo = to_vc4_bo(&exec->bo[i]->base);
+	drm_exec_init(exec_ctx, DRM_EXEC_INTERRUPTIBLE_WAIT, exec->bo_count);
+	drm_exec_until_all_locked(exec_ctx) {
+		ret = drm_exec_prepare_array(exec_ctx, exec->bo,
+					     exec->bo_count, 1);
+	}
 
-		ret = reservation_object_reserve_shared(bo->resv);
-		if (ret) {
-			vc4_unlock_bo_reservations(dev, exec, acquire_ctx);
-			return ret;
-		}
+	if (ret) {
+		drm_exec_fini(exec_ctx);
+		return ret;
 	}
 
 	return 0;
@@ -587,9 +612,11 @@ retry:
  */
 static int
 vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
-		 struct ww_acquire_ctx *acquire_ctx)
+		 struct drm_exec *exec_ctx,
+		 struct drm_syncobj *out_sync)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	struct vc4_exec_info *renderjob;
 	uint64_t seqno;
 	unsigned long irqflags;
 	struct vc4_fence *fence;
@@ -609,17 +636,23 @@ vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
 	fence->seqno = exec->seqno;
 	exec->fence = &fence->base;
 
-	vc4_update_bo_seqnos(exec, seqno);
+	if (out_sync)
+		drm_syncobj_replace_fence(out_sync, exec->fence);
 
-	vc4_unlock_bo_reservations(dev, exec, acquire_ctx);
+	vc4_attach_fences(exec);
+
+	drm_exec_fini(exec_ctx);
 
 	list_add_tail(&exec->head, &vc4->bin_job_list);
 
-	/* If no job was executing, kick ours off.  Otherwise, it'll
-	 * get started when the previous job's flush done interrupt
-	 * occurs.
+	/* If no bin job was executing and if the render job (if any) has the
+	 * same perfmon as our job attached to it (or if both jobs don't have
+	 * perfmon activated), then kick ours off.  Otherwise, it'll get
+	 * started when the previous job's flush/render done interrupt occurs.
 	 */
-	if (vc4_first_bin_job(vc4) == exec) {
+	renderjob = vc4_first_render_job(vc4);
+	if (vc4_first_bin_job(vc4) == exec &&
+	    (!renderjob || renderjob->perfmon == exec->perfmon)) {
 		vc4_submit_next_bin_job(dev);
 		vc4_queue_hangcheck(dev);
 	}
@@ -639,9 +672,6 @@ vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
  * The command validator needs to reference BOs by their index within
  * the submitted job's BO list.  This does the validation of the job's
  * BO list and reference counting for the lifetime of the job.
- *
- * Note that this function doesn't need to unreference the BOs on
- * failure, because that will happen at vc4_complete_exec() time.
  */
 static int
 vc4_cl_lookup_bos(struct drm_device *dev,
@@ -649,7 +679,6 @@ vc4_cl_lookup_bos(struct drm_device *dev,
 		  struct vc4_exec_info *exec)
 {
 	struct drm_vc4_submit_cl *args = exec->args;
-	uint32_t *handles;
 	int ret = 0;
 	int i;
 
@@ -663,46 +692,39 @@ vc4_cl_lookup_bos(struct drm_device *dev,
 		return -EINVAL;
 	}
 
-	exec->bo = kvmalloc_array(exec->bo_count,
-				    sizeof(struct drm_gem_cma_object *),
-				    GFP_KERNEL | __GFP_ZERO);
-	if (!exec->bo) {
-		DRM_ERROR("Failed to allocate validated BO pointers\n");
-		return -ENOMEM;
-	}
+	ret = drm_gem_objects_lookup(file_priv, u64_to_user_ptr(args->bo_handles),
+				     exec->bo_count, &exec->bo);
 
-	handles = kvmalloc_array(exec->bo_count, sizeof(uint32_t), GFP_KERNEL);
-	if (!handles) {
-		ret = -ENOMEM;
-		DRM_ERROR("Failed to allocate incoming GEM handles\n");
-		goto fail;
-	}
+	if (ret)
+		goto fail_put_bo;
 
-	if (copy_from_user(handles, u64_to_user_ptr(args->bo_handles),
-			   exec->bo_count * sizeof(uint32_t))) {
-		ret = -EFAULT;
-		DRM_ERROR("Failed to copy in GEM handles\n");
-		goto fail;
-	}
-
-	spin_lock(&file_priv->table_lock);
 	for (i = 0; i < exec->bo_count; i++) {
-		struct drm_gem_object *bo = idr_find(&file_priv->object_idr,
-						     handles[i]);
-		if (!bo) {
-			DRM_DEBUG("Failed to look up GEM BO %d: %d\n",
-				  i, handles[i]);
-			ret = -EINVAL;
-			spin_unlock(&file_priv->table_lock);
-			goto fail;
-		}
-		drm_gem_object_get(bo);
-		exec->bo[i] = (struct drm_gem_cma_object *)bo;
+		ret = vc4_bo_inc_usecnt(to_vc4_bo(exec->bo[i]));
+		if (ret)
+			goto fail_dec_usecnt;
 	}
-	spin_unlock(&file_priv->table_lock);
 
-fail:
-	kvfree(handles);
+	return 0;
+
+fail_dec_usecnt:
+	/* Decrease usecnt on acquired objects.
+	 * We cannot rely on  vc4_complete_exec() to release resources here,
+	 * because vc4_complete_exec() has no information about which BO has
+	 * had its ->usecnt incremented.
+	 * To make things easier we just free everything explicitly and set
+	 * exec->bo to NULL so that vc4_complete_exec() skips the 'BO release'
+	 * step.
+	 */
+	for (i-- ; i >= 0; i--)
+		vc4_bo_dec_usecnt(to_vc4_bo(exec->bo[i]));
+
+fail_put_bo:
+	/* Release any reference to acquired objects. */
+	for (i = 0; i < exec->bo_count && exec->bo[i]; i++)
+		drm_gem_object_put(exec->bo[i]);
+
+	kvfree(exec->bo);
+	exec->bo = NULL;
 	return ret;
 }
 
@@ -710,6 +732,7 @@ static int
 vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
 {
 	struct drm_vc4_submit_cl *args = exec->args;
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	void *temp = NULL;
 	void *bin;
 	int ret = 0;
@@ -742,8 +765,8 @@ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
 	 */
 	temp = kvmalloc_array(temp_size, 1, GFP_KERNEL);
 	if (!temp) {
-		DRM_ERROR("Failed to allocate storage for copying "
-			  "in bin/render CLs.\n");
+		drm_err(dev, "Failed to allocate storage for copying "
+			"in bin/render CLs.\n");
 		ret = -ENOMEM;
 		goto fail;
 	}
@@ -776,7 +799,7 @@ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
 
 	bo = vc4_bo_create(dev, exec_size, true, VC4_BO_TYPE_BCL);
 	if (IS_ERR(bo)) {
-		DRM_ERROR("Couldn't allocate BO for binning\n");
+		drm_err(dev, "Couldn't allocate BO for binning\n");
 		ret = PTR_ERR(bo);
 		goto fail;
 	}
@@ -785,16 +808,16 @@ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
 	list_add_tail(&to_vc4_bo(&exec->exec_bo->base)->unref_head,
 		      &exec->unref_list);
 
-	exec->ct0ca = exec->exec_bo->paddr + bin_offset;
+	exec->ct0ca = exec->exec_bo->dma_addr + bin_offset;
 
 	exec->bin_u = bin;
 
 	exec->shader_rec_v = exec->exec_bo->vaddr + shader_rec_offset;
-	exec->shader_rec_p = exec->exec_bo->paddr + shader_rec_offset;
+	exec->shader_rec_p = exec->exec_bo->dma_addr + shader_rec_offset;
 	exec->shader_rec_size = args->shader_rec_size;
 
 	exec->uniforms_v = exec->exec_bo->vaddr + uniforms_offset;
-	exec->uniforms_p = exec->exec_bo->paddr + uniforms_offset;
+	exec->uniforms_p = exec->exec_bo->dma_addr + uniforms_offset;
 	exec->uniforms_size = args->uniforms_size;
 
 	ret = vc4_validate_bin_cl(dev,
@@ -808,11 +831,11 @@ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
 	if (ret)
 		goto fail;
 
-	/* Block waiting on any previous rendering into the CS's VBO,
-	 * IB, or textures, so that pixels are actually written by the
-	 * time we try to read them.
-	 */
-	ret = vc4_wait_for_seqno(dev, exec->bin_dep_seqno, ~0ull, true);
+	if (exec->found_tile_binning_mode_config_packet) {
+		ret = vc4_v3d_bin_bo_get(vc4, &exec->bin_bo_used);
+		if (ret)
+			goto fail;
+	}
 
 fail:
 	kvfree(temp);
@@ -829,12 +852,18 @@ vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
 	/* If we got force-completed because of GPU reset rather than
 	 * through our IRQ handler, signal the fence now.
 	 */
-	if (exec->fence)
+	if (exec->fence) {
 		dma_fence_signal(exec->fence);
+		dma_fence_put(exec->fence);
+	}
 
 	if (exec->bo) {
-		for (i = 0; i < exec->bo_count; i++)
-			drm_gem_object_put_unlocked(&exec->bo[i]->base);
+		for (i = 0; i < exec->bo_count; i++) {
+			struct vc4_bo *bo = to_vc4_bo(exec->bo[i]);
+
+			vc4_bo_dec_usecnt(bo);
+			drm_gem_object_put(exec->bo[i]);
+		}
 		kvfree(exec->bo);
 	}
 
@@ -842,7 +871,7 @@ vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
 		struct vc4_bo *bo = list_first_entry(&exec->unref_list,
 						     struct vc4_bo, unref_head);
 		list_del(&bo->unref_head);
-		drm_gem_object_put_unlocked(&bo->base.base);
+		drm_gem_object_put(&bo->base.base);
 	}
 
 	/* Free up the allocation of any bin slots we used. */
@@ -850,12 +879,14 @@ vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
 	vc4->bin_alloc_used &= ~exec->bin_slots;
 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
 
-	mutex_lock(&vc4->power_lock);
-	if (--vc4->power_refcount == 0) {
-		pm_runtime_mark_last_busy(&vc4->v3d->pdev->dev);
-		pm_runtime_put_autosuspend(&vc4->v3d->pdev->dev);
-	}
-	mutex_unlock(&vc4->power_lock);
+	/* Release the reference on the binner BO if needed. */
+	if (exec->bin_bo_used)
+		vc4_v3d_bin_bo_put(vc4);
+
+	/* Release the reference we had on the perf monitor. */
+	vc4_perfmon_put(exec->perfmon);
+
+	vc4_v3d_pm_put(vc4);
 
 	kfree(exec);
 }
@@ -864,7 +895,9 @@ void
 vc4_job_handle_completed(struct vc4_dev *vc4)
 {
 	unsigned long irqflags;
-	struct vc4_seqno_cb *cb, *cb_temp;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return;
 
 	spin_lock_irqsave(&vc4->job_lock, irqflags);
 	while (!list_empty(&vc4->job_done_list)) {
@@ -874,48 +907,11 @@ vc4_job_handle_completed(struct vc4_dev *vc4)
 		list_del(&exec->head);
 
 		spin_unlock_irqrestore(&vc4->job_lock, irqflags);
-		vc4_complete_exec(vc4->dev, exec);
+		vc4_complete_exec(&vc4->base, exec);
 		spin_lock_irqsave(&vc4->job_lock, irqflags);
 	}
 
-	list_for_each_entry_safe(cb, cb_temp, &vc4->seqno_cb_list, work.entry) {
-		if (cb->seqno <= vc4->finished_seqno) {
-			list_del_init(&cb->work.entry);
-			schedule_work(&cb->work);
-		}
-	}
-
 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
-}
-
-static void vc4_seqno_cb_work(struct work_struct *work)
-{
-	struct vc4_seqno_cb *cb = container_of(work, struct vc4_seqno_cb, work);
-
-	cb->func(cb);
-}
-
-int vc4_queue_seqno_cb(struct drm_device *dev,
-		       struct vc4_seqno_cb *cb, uint64_t seqno,
-		       void (*func)(struct vc4_seqno_cb *cb))
-{
-	struct vc4_dev *vc4 = to_vc4_dev(dev);
-	int ret = 0;
-	unsigned long irqflags;
-
-	cb->func = func;
-	INIT_WORK(&cb->work, vc4_seqno_cb_work);
-
-	spin_lock_irqsave(&vc4->job_lock, irqflags);
-	if (seqno > vc4->finished_seqno) {
-		cb->seqno = seqno;
-		list_add_tail(&cb->work.entry, &vc4->seqno_cb_list);
-	} else {
-		schedule_work(&cb->work);
-	}
-	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
-
-	return ret;
 }
 
 /* Scheduled when any job has been completed, this walks the list of
@@ -953,7 +949,11 @@ int
 vc4_wait_seqno_ioctl(struct drm_device *dev, void *data,
 		     struct drm_file *file_priv)
 {
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	struct drm_vc4_wait_seqno *args = data;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
 
 	return vc4_wait_for_seqno_ioctl_helper(dev, args->seqno,
 					       &args->timeout_ns);
@@ -963,25 +963,32 @@ int
 vc4_wait_bo_ioctl(struct drm_device *dev, void *data,
 		  struct drm_file *file_priv)
 {
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	int ret;
 	struct drm_vc4_wait_bo *args = data;
-	struct drm_gem_object *gem_obj;
-	struct vc4_bo *bo;
+	unsigned long timeout_jiffies =
+		usecs_to_jiffies(div_u64(args->timeout_ns, 1000));
+	ktime_t start = ktime_get();
+	u64 delta_ns;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
 
 	if (args->pad != 0)
 		return -EINVAL;
 
-	gem_obj = drm_gem_object_lookup(file_priv, args->handle);
-	if (!gem_obj) {
-		DRM_DEBUG("Failed to look up GEM BO %d\n", args->handle);
-		return -EINVAL;
-	}
-	bo = to_vc4_bo(gem_obj);
+	ret = drm_gem_dma_resv_wait(file_priv, args->handle,
+				    true, timeout_jiffies);
 
-	ret = vc4_wait_for_seqno_ioctl_helper(dev, bo->seqno,
-					      &args->timeout_ns);
+	/* Decrement the user's timeout, in case we got interrupted
+	 * such that the ioctl will be restarted.
+	 */
+	delta_ns = ktime_to_ns(ktime_sub(ktime_get(), start));
+	if (delta_ns < args->timeout_ns)
+		args->timeout_ns -= delta_ns;
+	else
+		args->timeout_ns = 0;
 
-	drm_gem_object_put_unlocked(gem_obj);
 	return ret;
 }
 
@@ -1002,10 +1009,25 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 		    struct drm_file *file_priv)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	struct vc4_file *vc4file = file_priv->driver_priv;
 	struct drm_vc4_submit_cl *args = data;
+	struct drm_syncobj *out_sync = NULL;
 	struct vc4_exec_info *exec;
-	struct ww_acquire_ctx acquire_ctx;
+	struct drm_exec exec_ctx;
+	struct dma_fence *in_fence;
 	int ret = 0;
+
+	trace_vc4_submit_cl_ioctl(dev, args->bin_cl_size,
+				  args->shader_rec_size,
+				  args->bo_handle_count);
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
+
+	if (!vc4->v3d) {
+		DRM_DEBUG("VC4_SUBMIT_CL with no VC4 V3D probed\n");
+		return -ENODEV;
+	}
 
 	if ((args->flags & ~(VC4_SUBMIT_CL_USE_CLEAR_COLOR |
 			     VC4_SUBMIT_CL_FIXED_RCL_ORDER |
@@ -1015,23 +1037,22 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
-	exec = kcalloc(1, sizeof(*exec), GFP_KERNEL);
-	if (!exec) {
-		DRM_ERROR("malloc failure on exec struct\n");
-		return -ENOMEM;
+	if (args->pad2 != 0) {
+		DRM_DEBUG("Invalid pad: 0x%08x\n", args->pad2);
+		return -EINVAL;
 	}
 
-	mutex_lock(&vc4->power_lock);
-	if (vc4->power_refcount++ == 0) {
-		ret = pm_runtime_get_sync(&vc4->v3d->pdev->dev);
-		if (ret < 0) {
-			mutex_unlock(&vc4->power_lock);
-			vc4->power_refcount--;
-			kfree(exec);
-			return ret;
-		}
+	exec = kcalloc(1, sizeof(*exec), GFP_KERNEL);
+	if (!exec)
+		return -ENOMEM;
+
+	exec->dev = vc4;
+
+	ret = vc4_v3d_pm_get(vc4);
+	if (ret) {
+		kfree(exec);
+		return ret;
 	}
-	mutex_unlock(&vc4->power_lock);
 
 	exec->args = args;
 	INIT_LIST_HEAD(&exec->unref_list);
@@ -1039,6 +1060,38 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 	ret = vc4_cl_lookup_bos(dev, file_priv, exec);
 	if (ret)
 		goto fail;
+
+	if (args->perfmonid) {
+		exec->perfmon = vc4_perfmon_find(vc4file,
+						 args->perfmonid);
+		if (!exec->perfmon) {
+			ret = -ENOENT;
+			goto fail;
+		}
+	}
+
+	if (args->in_sync) {
+		ret = drm_syncobj_find_fence(file_priv, args->in_sync,
+					     0, 0, &in_fence);
+		if (ret)
+			goto fail;
+
+		/* When the fence (or fence array) is exclusively from our
+		 * context we can skip the wait since jobs are executed in
+		 * order of their submission through this ioctl and this can
+		 * only have fences from a prior job.
+		 */
+		if (!dma_fence_match_context(in_fence,
+					     vc4->dma_fence_context)) {
+			ret = dma_fence_wait(in_fence, true);
+			if (ret) {
+				dma_fence_put(in_fence);
+				goto fail;
+			}
+		}
+
+		dma_fence_put(in_fence);
+	}
 
 	if (exec->args->bin_cl_size != 0) {
 		ret = vc4_get_bcl(dev, exec);
@@ -1053,55 +1106,88 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 	if (ret)
 		goto fail;
 
-	ret = vc4_lock_bo_reservations(dev, exec, &acquire_ctx);
+	ret = vc4_lock_bo_reservations(exec, &exec_ctx);
 	if (ret)
 		goto fail;
+
+	if (args->out_sync) {
+		out_sync = drm_syncobj_find(file_priv, args->out_sync);
+		if (!out_sync) {
+			ret = -EINVAL;
+			goto fail_unreserve;
+		}
+
+		/* We replace the fence in out_sync in vc4_queue_submit since
+		 * the render job could execute immediately after that call.
+		 * If it finishes before our ioctl processing resumes the
+		 * render job fence could already have been freed.
+		 */
+	}
 
 	/* Clear this out of the struct we'll be putting in the queue,
 	 * since it's part of our stack.
 	 */
 	exec->args = NULL;
 
-	ret = vc4_queue_submit(dev, exec, &acquire_ctx);
+	ret = vc4_queue_submit(dev, exec, &exec_ctx, out_sync);
+
+	/* The syncobj isn't part of the exec data and we need to free our
+	 * reference even if job submission failed.
+	 */
+	if (out_sync)
+		drm_syncobj_put(out_sync);
+
 	if (ret)
-		goto fail;
+		goto fail_unreserve;
 
 	/* Return the seqno for our job. */
 	args->seqno = vc4->emit_seqno;
 
 	return 0;
 
+fail_unreserve:
+	drm_exec_fini(&exec_ctx);
 fail:
-	vc4_complete_exec(vc4->dev, exec);
+	vc4_complete_exec(&vc4->base, exec);
 
 	return ret;
 }
 
-void
-vc4_gem_init(struct drm_device *dev)
+static void vc4_gem_destroy(struct drm_device *dev, void *unused);
+int vc4_gem_init(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	int ret;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
 
 	vc4->dma_fence_context = dma_fence_context_alloc(1);
 
 	INIT_LIST_HEAD(&vc4->bin_job_list);
 	INIT_LIST_HEAD(&vc4->render_job_list);
 	INIT_LIST_HEAD(&vc4->job_done_list);
-	INIT_LIST_HEAD(&vc4->seqno_cb_list);
 	spin_lock_init(&vc4->job_lock);
 
 	INIT_WORK(&vc4->hangcheck.reset_work, vc4_reset_work);
-	setup_timer(&vc4->hangcheck.timer,
-		    vc4_hangcheck_elapsed,
-		    (unsigned long)dev);
+	timer_setup(&vc4->hangcheck.timer, vc4_hangcheck_elapsed, 0);
 
 	INIT_WORK(&vc4->job_done_work, vc4_job_done_work);
 
-	mutex_init(&vc4->power_lock);
+	ret = drmm_mutex_init(dev, &vc4->power_lock);
+	if (ret)
+		return ret;
+
+	INIT_LIST_HEAD(&vc4->purgeable.list);
+
+	ret = drmm_mutex_init(dev, &vc4->purgeable.lock);
+	if (ret)
+		return ret;
+
+	return drmm_add_action_or_reset(dev, vc4_gem_destroy, NULL);
 }
 
-void
-vc4_gem_destroy(struct drm_device *dev)
+static void vc4_gem_destroy(struct drm_device *dev, void *unused)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
@@ -1114,10 +1200,92 @@ vc4_gem_destroy(struct drm_device *dev)
 	 * the overflow allocation registers.  Now free the object.
 	 */
 	if (vc4->bin_bo) {
-		drm_gem_object_put_unlocked(&vc4->bin_bo->base.base);
+		drm_gem_object_put(&vc4->bin_bo->base.base);
 		vc4->bin_bo = NULL;
 	}
 
 	if (vc4->hang_state)
 		vc4_free_hang_state(dev, vc4->hang_state);
+}
+
+int vc4_gem_madvise_ioctl(struct drm_device *dev, void *data,
+			  struct drm_file *file_priv)
+{
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	struct drm_vc4_gem_madvise *args = data;
+	struct drm_gem_object *gem_obj;
+	struct vc4_bo *bo;
+	int ret;
+
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
+
+	switch (args->madv) {
+	case VC4_MADV_DONTNEED:
+	case VC4_MADV_WILLNEED:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (args->pad != 0)
+		return -EINVAL;
+
+	gem_obj = drm_gem_object_lookup(file_priv, args->handle);
+	if (!gem_obj) {
+		DRM_DEBUG("Failed to look up GEM BO %d\n", args->handle);
+		return -ENOENT;
+	}
+
+	bo = to_vc4_bo(gem_obj);
+
+	/* Only BOs exposed to userspace can be purged. */
+	if (bo->madv == __VC4_MADV_NOTSUPP) {
+		DRM_DEBUG("madvise not supported on this BO\n");
+		ret = -EINVAL;
+		goto out_put_gem;
+	}
+
+	/* Not sure it's safe to purge imported BOs. Let's just assume it's
+	 * not until proven otherwise.
+	 */
+	if (gem_obj->import_attach) {
+		DRM_DEBUG("madvise not supported on imported BOs\n");
+		ret = -EINVAL;
+		goto out_put_gem;
+	}
+
+	mutex_lock(&bo->madv_lock);
+
+	if (args->madv == VC4_MADV_DONTNEED && bo->madv == VC4_MADV_WILLNEED &&
+	    !refcount_read(&bo->usecnt)) {
+		/* If the BO is about to be marked as purgeable, is not used
+		 * and is not already purgeable or purged, add it to the
+		 * purgeable list.
+		 */
+		vc4_bo_add_to_purgeable_pool(bo);
+	} else if (args->madv == VC4_MADV_WILLNEED &&
+		   bo->madv == VC4_MADV_DONTNEED &&
+		   !refcount_read(&bo->usecnt)) {
+		/* The BO has not been purged yet, just remove it from
+		 * the purgeable list.
+		 */
+		vc4_bo_remove_from_purgeable_pool(bo);
+	}
+
+	/* Save the purged state. */
+	args->retained = bo->madv != __VC4_MADV_PURGED;
+
+	/* Update internal madv state only if the bo was not purged. */
+	if (bo->madv != __VC4_MADV_PURGED)
+		bo->madv = args->madv;
+
+	mutex_unlock(&bo->madv_lock);
+
+	ret = 0;
+
+out_put_gem:
+	drm_gem_object_put(gem_obj);
+
+	return ret;
 }

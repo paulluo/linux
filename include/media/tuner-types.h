@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * descriptions for simple tuners.
  */
@@ -167,13 +168,28 @@ struct tuner_params {
 	u16 iffreq;
 
 	unsigned int count;
-	struct tuner_range *ranges;
+	const struct tuner_range *ranges;
 };
 
+/**
+ * struct tunertype - describes the known tuners.
+ *
+ * @name:	string with the tuner's name.
+ * @count:	size of &struct tuner_params array.
+ * @params:	pointer to &struct tuner_params array.
+ *
+ * @min:	minimal tuner frequency, in 62.5 kHz step.
+ *		should be multiplied to 16 to convert to MHz.
+ * @max:	minimal tuner frequency, in 62.5 kHz step.
+ *		Should be multiplied to 16 to convert to MHz.
+ * @stepsize:	frequency step, in Hz.
+ * @initdata:	optional byte sequence to initialize the tuner.
+ * @sleepdata:	optional byte sequence to power down the tuner.
+ */
 struct tunertype {
 	char *name;
 	unsigned int count;
-	struct tuner_params *params;
+	const struct tuner_params *params;
 
 	u16 min;
 	u16 max;
@@ -183,7 +199,7 @@ struct tunertype {
 	u8 *sleepdata;
 };
 
-extern struct tunertype tuners[];
+extern const struct tunertype tuners[];
 extern unsigned const int tuner_count;
 
 #endif

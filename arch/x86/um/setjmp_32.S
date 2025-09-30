@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #
 # arch/i386/setjmp.S
 #
@@ -33,7 +34,7 @@ kernel_setjmp:
 	movl %esi,12(%edx)
 	movl %edi,16(%edx)
 	movl %ecx,20(%edx)		# Return address
-	ret
+	RET
 
 	.size kernel_setjmp,.-kernel_setjmp
 

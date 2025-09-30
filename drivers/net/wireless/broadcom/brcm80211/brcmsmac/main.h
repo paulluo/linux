@@ -563,6 +563,7 @@ struct brcms_c_info {
 
 	struct wiphy *wiphy;
 	struct scb pri_scb;
+	struct ieee80211_vif *vif;
 
 	struct sk_buff *beacon;
 	u16 beacon_tim_offset;
@@ -602,7 +603,7 @@ enum brcms_bss_type {
  * cur_etheraddr: h/w address
  * flags: BSSCFG flags; see below
  *
- * current_bss: BSS parms in ASSOCIATED state
+ * current_bss: BSS parameters in ASSOCIATED state
  *
  *
  * ID: 'unique' ID of this bsscfg, assigned at bsscfg allocation

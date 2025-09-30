@@ -32,7 +32,7 @@ do {							\
 		".previous\n"				\
 							\
 		".section\t__ex_table,\"a\"\n\t"	\
-		STR(PTR) "\t1b, 3b\n\t"			\
+		STR(PTR_WD) "\t1b, 3b\n\t"		\
 		".previous\n"				\
 							\
 		: [tmp_dst] "=&r" (dst), [tmp_err] "=r" (error)\
@@ -54,7 +54,7 @@ do {						\
 		".previous\n"			\
 						\
 		".section\t__ex_table,\"a\"\n\t"\
-		STR(PTR) "\t1b, 3b\n\t"		\
+		STR(PTR_WD) "\t1b, 3b\n\t"	\
 		".previous\n"			\
 						\
 		: [tmp_err] "=r" (error)	\
@@ -85,6 +85,26 @@ struct dyn_arch_ftrace {
 };
 
 #endif /*  CONFIG_DYNAMIC_FTRACE */
+
+void prepare_ftrace_return(unsigned long *parent_ra_addr, unsigned long self_ra,
+			   unsigned long fp);
+
 #endif /* __ASSEMBLY__ */
 #endif /* CONFIG_FUNCTION_TRACER */
+
+#ifdef CONFIG_FTRACE_SYSCALLS
+#ifndef __ASSEMBLY__
+/*
+ * Some syscall entry functions on mips start with "__sys_" (fork and clone,
+ * for instance). We should also match the sys_ variant with those.
+ */
+#define ARCH_HAS_SYSCALL_MATCH_SYM_NAME
+static inline bool arch_syscall_match_sym_name(const char *sym,
+					       const char *name)
+{
+	return !strcmp(sym, name) ||
+		(!strncmp(sym, "__sys_", 6) && !strcmp(sym + 6, name + 4));
+}
+#endif /* __ASSEMBLY__ */
+#endif /* CONFIG_FTRACE_SYSCALLS */
 #endif /* _ASM_MIPS_FTRACE_H */

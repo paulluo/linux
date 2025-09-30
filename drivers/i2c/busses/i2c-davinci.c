@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * TI DAVINCI I2C adapter driver.
  *
@@ -8,34 +9,25 @@
  *
  * ----------------------------------------------------------------------------
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  * ----------------------------------------------------------------------------
- *
  */
+
+#include <linux/clk.h>
+#include <linux/cpufreq.h>
+#include <linux/delay.h>
+#include <linux/err.h>
+#include <linux/errno.h>
+#include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/delay.h>
-#include <linux/i2c.h>
-#include <linux/clk.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/err.h>
-#include <linux/interrupt.h>
 #include <linux/platform_device.h>
-#include <linux/io.h>
+#include <linux/pm_runtime.h>
+#include <linux/property.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/cpufreq.h>
-#include <linux/gpio.h>
-#include <linux/of_device.h>
-#include <linux/platform_data/i2c-davinci.h>
 
 /* ----- global defines ----------------------------------------------- */
 
@@ -122,6 +114,11 @@
 /* set the SDA GPIO low */
 #define DAVINCI_I2C_DCLR_PDCLR1	BIT(1)
 
+/* timeout for pm runtime autosuspend */
+#define DAVINCI_I2C_PM_TIMEOUT	1000	/* ms */
+
+#define DAVINCI_I2C_DEFAULT_BUS_FREQ	100
+
 struct davinci_i2c_dev {
 	struct device           *dev;
 	void __iomem		*base;
@@ -135,16 +132,12 @@ struct davinci_i2c_dev {
 	u8			terminate;
 	struct i2c_adapter	adapter;
 #ifdef CONFIG_CPU_FREQ
-	struct completion	xfr_complete;
 	struct notifier_block	freq_transition;
 #endif
-	struct davinci_i2c_platform_data *pdata;
-};
-
-/* default platform data to use if not supplied in the platform_device */
-static struct davinci_i2c_platform_data davinci_i2c_platform_data_default = {
-	.bus_freq	= 100,
-	.bus_delay	= 0,
+	/* standard bus frequency (kHz) */
+	unsigned int		bus_freq;
+	/* Chip has a ICPFUNC register */
+	bool			has_pfunc;
 };
 
 static inline void davinci_i2c_write_reg(struct davinci_i2c_dev *i2c_dev,
@@ -174,14 +167,12 @@ static inline void davinci_i2c_reset_ctrl(struct davinci_i2c_dev *i2c_dev,
 
 static void i2c_davinci_calc_clk_dividers(struct davinci_i2c_dev *dev)
 {
-	struct davinci_i2c_platform_data *pdata = dev->pdata;
 	u16 psc;
 	u32 clk;
 	u32 d;
 	u32 clkh;
 	u32 clkl;
 	u32 input_clock = clk_get_rate(dev->clk);
-	struct device_node *of_node = dev->dev->of_node;
 
 	/* NOTE: I2C Clock divider programming info
 	 * As per I2C specs the following formulas provide prescaler
@@ -215,31 +206,35 @@ static void i2c_davinci_calc_clk_dividers(struct davinci_i2c_dev *dev)
 		psc++;	/* better to run under spec than over */
 	d = (psc >= 2) ? 5 : 7 - psc;
 
-	if (of_node && of_device_is_compatible(of_node, "ti,keystone-i2c"))
+	if (device_is_compatible(dev->dev, "ti,keystone-i2c"))
 		d = 6;
 
-	clk = ((input_clock / (psc + 1)) / (pdata->bus_freq * 1000));
+	clk = ((input_clock / (psc + 1)) / (dev->bus_freq * 1000));
 	/* Avoid driving the bus too fast because of rounding errors above */
-	if (input_clock / (psc + 1) / clk > pdata->bus_freq * 1000)
+	if (input_clock / (psc + 1) / clk > dev->bus_freq * 1000)
 		clk++;
 	/*
 	 * According to I2C-BUS Spec 2.1, in FAST-MODE LOW period should be at
 	 * least 1.3uS, which is not the case with 50% duty cycle. Driving HIGH
 	 * to LOW ratio as 1 to 2 is more safe.
 	 */
-	if (pdata->bus_freq > 100)
+	if (dev->bus_freq > 100)
 		clkl = (clk << 1) / 3;
 	else
 		clkl = (clk >> 1);
 	/*
 	 * It's not always possible to have 1 to 2 ratio when d=7, so fall back
 	 * to minimal possible clkh in this case.
+	 *
+	 * Note:
+	 * CLKH is not allowed to be 0, in this case I2C clock is not generated
+	 * at all
 	 */
-	if (clk >= clkl + d) {
+	if (clk > clkl + d) {
 		clkh = clk - clkl - d;
 		clkl -= d;
 	} else {
-		clkh = 0;
+		clkh = 1;
 		clkl = clk - (d << 1);
 	}
 
@@ -257,15 +252,13 @@ static void i2c_davinci_calc_clk_dividers(struct davinci_i2c_dev *dev)
  */
 static int i2c_davinci_init(struct davinci_i2c_dev *dev)
 {
-	struct davinci_i2c_platform_data *pdata = dev->pdata;
-
 	/* put I2C into reset */
 	davinci_i2c_reset_ctrl(dev, 0);
 
 	/* compute clock dividers */
 	i2c_davinci_calc_clk_dividers(dev);
 
-	/* Respond at reserved "SMBus Host" slave address" (and zero);
+	/* Respond at reserved "SMBus Host" target address" (and zero);
 	 * we seem to have no option to not respond...
 	 */
 	davinci_i2c_write_reg(dev, DAVINCI_I2C_OAR_REG, DAVINCI_I2C_OWN_ADDRESS);
@@ -276,8 +269,7 @@ static int i2c_davinci_init(struct davinci_i2c_dev *dev)
 		davinci_i2c_read_reg(dev, DAVINCI_I2C_CLKL_REG));
 	dev_dbg(dev->dev, "CLKH = %d\n",
 		davinci_i2c_read_reg(dev, DAVINCI_I2C_CLKH_REG));
-	dev_dbg(dev->dev, "bus_freq = %dkHz, bus_delay = %d\n",
-		pdata->bus_freq, pdata->bus_delay);
+	dev_dbg(dev->dev, "bus_freq = %dkHz\n", dev->bus_freq);
 
 
 	/* Take the I2C module out of reset: */
@@ -290,7 +282,7 @@ static int i2c_davinci_init(struct davinci_i2c_dev *dev)
 }
 
 /*
- * This routine does i2c bus recovery by using i2c_generic_gpio_recovery
+ * This routine does i2c bus recovery by using i2c_generic_scl_recovery
  * which is provided by I2C Bus recovery infrastructure.
  */
 static void davinci_i2c_prepare_recovery(struct i2c_adapter *adap)
@@ -310,12 +302,6 @@ static void davinci_i2c_unprepare_recovery(struct i2c_adapter *adap)
 
 	i2c_davinci_init(dev);
 }
-
-static struct i2c_bus_recovery_info davinci_i2c_gpio_recovery_info = {
-	.recover_bus = i2c_generic_gpio_recovery,
-	.prepare_recovery = davinci_i2c_prepare_recovery,
-	.unprepare_recovery = davinci_i2c_unprepare_recovery,
-};
 
 static void davinci_i2c_set_scl(struct i2c_adapter *adap, int val)
 {
@@ -409,14 +395,13 @@ static int i2c_davinci_wait_bus_not_busy(struct davinci_i2c_dev *dev)
 }
 
 /*
- * Low level master read/write transaction. This function is called
- * from i2c_davinci_xfer.
+ * Low level read/write transaction. This function is called from
+ * i2c_davinci_xfer.
  */
 static int
 i2c_davinci_xfer_msg(struct i2c_adapter *adap, struct i2c_msg *msg, int stop)
 {
 	struct davinci_i2c_dev *dev = i2c_get_adapdata(adap);
-	struct davinci_i2c_platform_data *pdata = dev->pdata;
 	u32 flag;
 	u16 w;
 	unsigned long time_left;
@@ -426,11 +411,7 @@ i2c_davinci_xfer_msg(struct i2c_adapter *adap, struct i2c_msg *msg, int stop)
 		return -EADDRNOTAVAIL;
 	}
 
-	/* Introduce a delay, required for some boards (e.g Davinci EVM) */
-	if (pdata->bus_delay)
-		udelay(pdata->bus_delay);
-
-	/* set the slave address */
+	/* set the target address */
 	davinci_i2c_write_reg(dev, DAVINCI_I2C_SAR_REG, msg->addr);
 
 	dev->buf = msg->buf;
@@ -442,10 +423,9 @@ i2c_davinci_xfer_msg(struct i2c_adapter *adap, struct i2c_msg *msg, int stop)
 	reinit_completion(&dev->cmd_complete);
 	dev->cmd_err = 0;
 
-	/* Take I2C out of reset and configure it as master */
+	/* Take I2C out of reset and configure it as controller */
 	flag = DAVINCI_I2C_MDR_IRS | DAVINCI_I2C_MDR_MST;
 
-	/* if the slave address is ten bit address, enable XA bit */
 	if (msg->flags & I2C_M_TEN)
 		flag |= DAVINCI_I2C_MDR_XA;
 	if (!(msg->flags & I2C_M_RD))
@@ -491,7 +471,6 @@ i2c_davinci_xfer_msg(struct i2c_adapter *adap, struct i2c_msg *msg, int stop)
 	time_left = wait_for_completion_timeout(&dev->cmd_complete,
 						dev->adapter.timeout);
 	if (!time_left) {
-		dev_err(dev->dev, "controller timed out\n");
 		i2c_recover_bus(adap);
 		dev->buf_len = 0;
 		return -ETIMEDOUT;
@@ -500,7 +479,7 @@ i2c_davinci_xfer_msg(struct i2c_adapter *adap, struct i2c_msg *msg, int stop)
 		/* This should be 0 if all bytes were transferred
 		 * or dev->cmd_err denotes an error.
 		 */
-		dev_err(dev->dev, "abnormal termination buf_len=%i\n",
+		dev_err(dev->dev, "abnormal termination buf_len=%zu\n",
 			dev->buf_len);
 		dev->terminate = 1;
 		wmb();
@@ -541,10 +520,16 @@ i2c_davinci_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 
 	dev_dbg(dev->dev, "%s: msgs: %d\n", __func__, num);
 
+	ret = pm_runtime_resume_and_get(dev->dev);
+	if (ret < 0) {
+		dev_err(dev->dev, "Failed to runtime_get device: %d\n", ret);
+		return ret;
+	}
+
 	ret = i2c_davinci_wait_bus_not_busy(dev);
 	if (ret < 0) {
 		dev_warn(dev->dev, "timeout waiting for bus ready\n");
-		return ret;
+		goto out;
 	}
 
 	for (i = 0; i < num; i++) {
@@ -552,19 +537,22 @@ i2c_davinci_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 		dev_dbg(dev->dev, "%s [%d/%d] ret: %d\n", __func__, i + 1, num,
 			ret);
 		if (ret < 0)
-			return ret;
+			goto out;
 	}
 
-#ifdef CONFIG_CPU_FREQ
-	complete(&dev->xfr_complete);
-#endif
+	ret = num;
 
-	return num;
+out:
+	pm_runtime_mark_last_busy(dev->dev);
+	pm_runtime_put_autosuspend(dev->dev);
+
+	return ret;
 }
 
 static u32 i2c_davinci_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL |
+		I2C_FUNC_PROTOCOL_MANGLING;
 }
 
 static void terminate_read(struct davinci_i2c_dev *dev)
@@ -598,6 +586,9 @@ static irqreturn_t i2c_davinci_isr(int this_irq, void *dev_id)
 	u32 stat;
 	int count = 0;
 	u16 w;
+
+	if (pm_runtime_suspended(dev->dev))
+		return IRQ_NONE;
 
 	while ((stat = davinci_i2c_read_reg(dev, DAVINCI_I2C_IVR_REG))) {
 		dev_dbg(dev->dev, "%s: stat=0x%x\n", __func__, stat);
@@ -679,7 +670,7 @@ static irqreturn_t i2c_davinci_isr(int this_irq, void *dev_id)
 			break;
 
 		case DAVINCI_I2C_IVR_AAS:
-			dev_dbg(dev->dev, "Address as slave interrupt\n");
+			dev_dbg(dev->dev, "Address as target interrupt\n");
 			break;
 
 		default:
@@ -698,13 +689,15 @@ static int i2c_davinci_cpufreq_transition(struct notifier_block *nb,
 	struct davinci_i2c_dev *dev;
 
 	dev = container_of(nb, struct davinci_i2c_dev, freq_transition);
+
+	i2c_lock_bus(&dev->adapter, I2C_LOCK_ROOT_ADAPTER);
 	if (val == CPUFREQ_PRECHANGE) {
-		wait_for_completion(&dev->xfr_complete);
 		davinci_i2c_reset_ctrl(dev, 0);
 	} else if (val == CPUFREQ_POSTCHANGE) {
 		i2c_davinci_calc_clk_dividers(dev);
 		davinci_i2c_reset_ctrl(dev, 1);
 	}
+	i2c_unlock_bus(&dev->adapter, I2C_LOCK_ROOT_ADAPTER);
 
 	return 0;
 }
@@ -734,8 +727,8 @@ static inline void i2c_davinci_cpufreq_deregister(struct davinci_i2c_dev *dev)
 #endif
 
 static const struct i2c_algorithm i2c_davinci_algo = {
-	.master_xfer	= i2c_davinci_xfer,
-	.functionality	= i2c_davinci_func,
+	.xfer = i2c_davinci_xfer,
+	.functionality = i2c_davinci_func,
 };
 
 static const struct of_device_id davinci_i2c_of_match[] = {
@@ -749,66 +742,50 @@ static int davinci_i2c_probe(struct platform_device *pdev)
 {
 	struct davinci_i2c_dev *dev;
 	struct i2c_adapter *adap;
-	struct resource *mem;
 	int r, irq;
+	u32 prop;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0) {
-		if (!irq)
-			irq = -ENXIO;
-		if (irq != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"can't get irq resource ret=%d\n", irq);
+	if (irq < 0)
 		return irq;
-	}
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(struct davinci_i2c_dev),
-			GFP_KERNEL);
-	if (!dev) {
-		dev_err(&pdev->dev, "Memory allocation failed\n");
+	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	if (!dev)
 		return -ENOMEM;
-	}
 
 	init_completion(&dev->cmd_complete);
-#ifdef CONFIG_CPU_FREQ
-	init_completion(&dev->xfr_complete);
-#endif
+
 	dev->dev = &pdev->dev;
 	dev->irq = irq;
-	dev->pdata = dev_get_platdata(&pdev->dev);
 	platform_set_drvdata(pdev, dev);
 
-	if (!dev->pdata && pdev->dev.of_node) {
-		u32 prop;
+	r = device_property_read_u32(&pdev->dev, "clock-frequency", &prop);
+	if (r)
+		prop = DAVINCI_I2C_DEFAULT_BUS_FREQ;
 
-		dev->pdata = devm_kzalloc(&pdev->dev,
-			sizeof(struct davinci_i2c_platform_data), GFP_KERNEL);
-		if (!dev->pdata)
-			return -ENOMEM;
+	dev->bus_freq = prop / 1000;
 
-		memcpy(dev->pdata, &davinci_i2c_platform_data_default,
-			sizeof(struct davinci_i2c_platform_data));
-		if (!of_property_read_u32(pdev->dev.of_node, "clock-frequency",
-			&prop))
-			dev->pdata->bus_freq = prop / 1000;
-
-		dev->pdata->has_pfunc =
-			of_property_read_bool(pdev->dev.of_node,
-					      "ti,has-pfunc");
-	} else if (!dev->pdata) {
-		dev->pdata = &davinci_i2c_platform_data_default;
-	}
+	dev->has_pfunc = device_property_present(&pdev->dev, "ti,has-pfunc");
 
 	dev->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(dev->clk))
 		return PTR_ERR(dev->clk);
-	clk_prepare_enable(dev->clk);
 
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dev->base = devm_ioremap_resource(&pdev->dev, mem);
+	dev->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dev->base)) {
-		r = PTR_ERR(dev->base);
-		goto err_unuse_clocks;
+		return PTR_ERR(dev->base);
+	}
+
+	pm_runtime_set_autosuspend_delay(dev->dev,
+					 DAVINCI_I2C_PM_TIMEOUT);
+	pm_runtime_use_autosuspend(dev->dev);
+
+	pm_runtime_enable(dev->dev);
+
+	r = pm_runtime_resume_and_get(dev->dev);
+	if (r < 0) {
+		dev_err(dev->dev, "failed to runtime_get device: %d\n", r);
+		goto err_pm;
 	}
 
 	i2c_davinci_init(dev);
@@ -830,57 +807,60 @@ static int davinci_i2c_probe(struct platform_device *pdev)
 	i2c_set_adapdata(adap, dev);
 	adap->owner = THIS_MODULE;
 	adap->class = I2C_CLASS_DEPRECATED;
-	strlcpy(adap->name, "DaVinci I2C adapter", sizeof(adap->name));
+	strscpy(adap->name, "DaVinci I2C adapter", sizeof(adap->name));
 	adap->algo = &i2c_davinci_algo;
 	adap->dev.parent = &pdev->dev;
 	adap->timeout = DAVINCI_I2C_TIMEOUT;
-	adap->dev.of_node = pdev->dev.of_node;
+	adap->dev.of_node = dev_of_node(&pdev->dev);
 
-	if (dev->pdata->has_pfunc)
+	if (dev->has_pfunc)
 		adap->bus_recovery_info = &davinci_i2c_scl_recovery_info;
-	else if (dev->pdata->scl_pin) {
-		adap->bus_recovery_info = &davinci_i2c_gpio_recovery_info;
-		adap->bus_recovery_info->scl_gpio = dev->pdata->scl_pin;
-		adap->bus_recovery_info->sda_gpio = dev->pdata->sda_pin;
-	}
 
 	adap->nr = pdev->id;
 	r = i2c_add_numbered_adapter(adap);
 	if (r)
 		goto err_unuse_clocks;
 
+	pm_runtime_mark_last_busy(dev->dev);
+	pm_runtime_put_autosuspend(dev->dev);
+
 	return 0;
 
 err_unuse_clocks:
-	clk_disable_unprepare(dev->clk);
-	dev->clk = NULL;
+	pm_runtime_dont_use_autosuspend(dev->dev);
+	pm_runtime_put_sync(dev->dev);
+err_pm:
+	pm_runtime_disable(dev->dev);
+
 	return r;
 }
 
-static int davinci_i2c_remove(struct platform_device *pdev)
+static void davinci_i2c_remove(struct platform_device *pdev)
 {
 	struct davinci_i2c_dev *dev = platform_get_drvdata(pdev);
+	int ret;
 
 	i2c_davinci_cpufreq_deregister(dev);
 
 	i2c_del_adapter(&dev->adapter);
 
-	clk_disable_unprepare(dev->clk);
-	dev->clk = NULL;
+	ret = pm_runtime_get_sync(&pdev->dev);
+	if (ret < 0)
+		dev_err(&pdev->dev, "Failed to resume device\n");
+	else
+		davinci_i2c_write_reg(dev, DAVINCI_I2C_MDR_REG, 0);
 
-	davinci_i2c_write_reg(dev, DAVINCI_I2C_MDR_REG, 0);
-
-	return 0;
+	pm_runtime_dont_use_autosuspend(dev->dev);
+	pm_runtime_put_sync(dev->dev);
+	pm_runtime_disable(dev->dev);
 }
 
-#ifdef CONFIG_PM
 static int davinci_i2c_suspend(struct device *dev)
 {
 	struct davinci_i2c_dev *i2c_dev = dev_get_drvdata(dev);
 
 	/* put I2C into reset */
 	davinci_i2c_reset_ctrl(i2c_dev, 0);
-	clk_disable_unprepare(i2c_dev->clk);
 
 	return 0;
 }
@@ -889,7 +869,6 @@ static int davinci_i2c_resume(struct device *dev)
 {
 	struct davinci_i2c_dev *i2c_dev = dev_get_drvdata(dev);
 
-	clk_prepare_enable(i2c_dev->clk);
 	/* take I2C out of reset */
 	davinci_i2c_reset_ctrl(i2c_dev, 1);
 
@@ -899,22 +878,23 @@ static int davinci_i2c_resume(struct device *dev)
 static const struct dev_pm_ops davinci_i2c_pm = {
 	.suspend        = davinci_i2c_suspend,
 	.resume         = davinci_i2c_resume,
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				  pm_runtime_force_resume)
 };
 
-#define davinci_i2c_pm_ops (&davinci_i2c_pm)
-#else
-#define davinci_i2c_pm_ops NULL
-#endif
-
-/* work with hotplug and coldplug */
-MODULE_ALIAS("platform:i2c_davinci");
+static const struct platform_device_id davinci_i2c_driver_ids[] = {
+	{ .name = "i2c_davinci", },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(platform, davinci_i2c_driver_ids);
 
 static struct platform_driver davinci_i2c_driver = {
 	.probe		= davinci_i2c_probe,
 	.remove		= davinci_i2c_remove,
+	.id_table	= davinci_i2c_driver_ids,
 	.driver		= {
 		.name	= "i2c_davinci",
-		.pm	= davinci_i2c_pm_ops,
+		.pm	= pm_sleep_ptr(&davinci_i2c_pm),
 		.of_match_table = davinci_i2c_of_match,
 	},
 };

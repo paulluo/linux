@@ -124,7 +124,6 @@ static int midi_service_irq(struct echoaudio *chip)
 		return 0;
 
 	/* Get the MIDI data from the comm page */
-	i = 1;
 	received = 0;
 	for (i = 1; i <= count; i++) {
 		/* Get the MIDI byte */
@@ -199,16 +198,16 @@ static int snd_echo_midi_output_open(struct snd_rawmidi_substream *substream)
 
 
 
-static void snd_echo_midi_output_write(unsigned long data)
+static void snd_echo_midi_output_write(struct timer_list *t)
 {
-	struct echoaudio *chip = (struct echoaudio *)data;
+	struct echoaudio *chip = timer_container_of(chip, t, timer);
 	unsigned long flags;
 	int bytes, sent, time;
 	unsigned char buf[MIDI_OUT_BUFFER_SIZE - 1];
 
 	/* No interrupts are involved: we have to check at regular intervals
 	if the card's output buffer has room for new data. */
-	sent = bytes = 0;
+	sent = 0;
 	spin_lock_irqsave(&chip->lock, flags);
 	chip->midi_full = 0;
 	if (!snd_rawmidi_transmit_empty(chip->midi_out)) {
@@ -257,15 +256,15 @@ static void snd_echo_midi_output_trigger(struct snd_rawmidi_substream *substream
 	spin_lock_irq(&chip->lock);
 	if (up) {
 		if (!chip->tinuse) {
-			setup_timer(&chip->timer, snd_echo_midi_output_write,
-				    (unsigned long)chip);
+			timer_setup(&chip->timer, snd_echo_midi_output_write,
+				    0);
 			chip->tinuse = 1;
 		}
 	} else {
 		if (chip->tinuse) {
 			chip->tinuse = 0;
 			spin_unlock_irq(&chip->lock);
-			del_timer_sync(&chip->timer);
+			timer_delete_sync(&chip->timer);
 			dev_dbg(chip->card->dev, "Timer removed\n");
 			return;
 		}
@@ -273,7 +272,7 @@ static void snd_echo_midi_output_trigger(struct snd_rawmidi_substream *substream
 	spin_unlock_irq(&chip->lock);
 
 	if (up && !chip->midi_full)
-		snd_echo_midi_output_write((unsigned long)chip);
+		snd_echo_midi_output_write(&chip->timer);
 }
 
 
@@ -308,11 +307,11 @@ static int snd_echo_midi_create(struct snd_card *card,
 {
 	int err;
 
-	if ((err = snd_rawmidi_new(card, card->shortname, 0, 1, 1,
-				   &chip->rmidi)) < 0)
+	err = snd_rawmidi_new(card, card->shortname, 0, 1, 1, &chip->rmidi);
+	if (err < 0)
 		return err;
 
-	strcpy(chip->rmidi->name, card->shortname);
+	strscpy(chip->rmidi->name, card->shortname);
 	chip->rmidi->private_data = chip;
 
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT,

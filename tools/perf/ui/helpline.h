@@ -1,10 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PERF_UI_HELPLINE_H_
 #define _PERF_UI_HELPLINE_H_ 1
 
 #include <stdio.h>
 #include <stdarg.h>
-
-#include "../util/cache.h"
 
 struct ui_helpline {
 	void (*pop)(void);

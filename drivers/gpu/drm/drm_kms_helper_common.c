@@ -27,34 +27,6 @@
 
 #include <linux/module.h>
 
-#include "drm_crtc_helper_internal.h"
-
 MODULE_AUTHOR("David Airlie, Jesse Barnes");
 MODULE_DESCRIPTION("DRM KMS helper");
 MODULE_LICENSE("GPL and additional rights");
-
-static int __init drm_kms_helper_init(void)
-{
-	int ret;
-
-	/* Call init functions from specific kms helpers here */
-	ret = drm_fb_helper_modinit();
-	if (ret < 0)
-		goto out;
-
-	ret = drm_dp_aux_dev_init();
-	if (ret < 0)
-		goto out;
-
-out:
-	return ret;
-}
-
-static void __exit drm_kms_helper_exit(void)
-{
-	/* Call exit functions from specific kms helpers here */
-	drm_dp_aux_dev_exit();
-}
-
-module_init(drm_kms_helper_init);
-module_exit(drm_kms_helper_exit);

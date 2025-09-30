@@ -1,60 +1,16 @@
-#ifndef _CHIP_H
-#define _CHIP_H
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+ * Copyright(c) 2015 - 2020 Intel Corporation.
  */
 
+#ifndef _CHIP_H
+#define _CHIP_H
 /*
  * This file contains all of the defines that is specific to the HFI chip
  */
 
 /* sizes */
-#define CCE_NUM_MSIX_VECTORS 256
-#define CCE_NUM_INT_CSRS 12
-#define CCE_NUM_INT_MAP_CSRS 96
+#define BITS_PER_REGISTER (BITS_PER_BYTE * sizeof(u64))
 #define NUM_INTERRUPT_SOURCES 768
 #define RXE_NUM_CONTEXTS 160
 #define RXE_PER_CONTEXT_SIZE 0x1000	/* 4k */
@@ -161,40 +117,64 @@
 	(CR_CREDIT_RETURN_DUE_TO_FORCE_MASK << \
 	CR_CREDIT_RETURN_DUE_TO_FORCE_SHIFT)
 
-/* interrupt source numbers */
-#define IS_GENERAL_ERR_START	  0
-#define IS_SDMAENG_ERR_START	 16
-#define IS_SENDCTXT_ERR_START	 32
-#define IS_SDMA_START		192 /* includes SDmaProgress,SDmaIdle */
+/* Specific IRQ sources */
+#define CCE_ERR_INT		  0
+#define RXE_ERR_INT		  1
+#define MISC_ERR_INT		  2
+#define PIO_ERR_INT		  4
+#define SDMA_ERR_INT		  5
+#define EGRESS_ERR_INT		  6
+#define TXE_ERR_INT		  7
+#define PBC_INT			240
+#define GPIO_ASSERT_INT		241
+#define QSFP1_INT		242
+#define QSFP2_INT		243
+#define TCRIT_INT		244
+
+/* interrupt source ranges */
+#define IS_FIRST_SOURCE		CCE_ERR_INT
+#define IS_GENERAL_ERR_START		  0
+#define IS_SDMAENG_ERR_START		 16
+#define IS_SENDCTXT_ERR_START		 32
+#define IS_SDMA_START			192
+#define IS_SDMA_PROGRESS_START		208
+#define IS_SDMA_IDLE_START		224
 #define IS_VARIOUS_START		240
 #define IS_DC_START			248
 #define IS_RCVAVAIL_START		256
 #define IS_RCVURGENT_START		416
 #define IS_SENDCREDIT_START		576
 #define IS_RESERVED_START		736
-#define IS_MAX_SOURCES		768
+#define IS_LAST_SOURCE			767
 
 /* derived interrupt source values */
-#define IS_GENERAL_ERR_END		IS_SDMAENG_ERR_START
-#define IS_SDMAENG_ERR_END		IS_SENDCTXT_ERR_START
-#define IS_SENDCTXT_ERR_END		IS_SDMA_START
-#define IS_SDMA_END			IS_VARIOUS_START
-#define IS_VARIOUS_END		IS_DC_START
-#define IS_DC_END			IS_RCVAVAIL_START
-#define IS_RCVAVAIL_END		IS_RCVURGENT_START
-#define IS_RCVURGENT_END		IS_SENDCREDIT_START
-#define IS_SENDCREDIT_END		IS_RESERVED_START
-#define IS_RESERVED_END		IS_MAX_SOURCES
-
-/* absolute interrupt numbers for QSFP1Int and QSFP2Int */
-#define QSFP1_INT		242
-#define QSFP2_INT		243
+#define IS_GENERAL_ERR_END		7
+#define IS_SDMAENG_ERR_END		31
+#define IS_SENDCTXT_ERR_END		191
+#define IS_SDMA_END                     207
+#define IS_SDMA_PROGRESS_END            223
+#define IS_SDMA_IDLE_END		239
+#define IS_VARIOUS_END			244
+#define IS_DC_END			255
+#define IS_RCVAVAIL_END			415
+#define IS_RCVURGENT_END		575
+#define IS_SENDCREDIT_END		735
+#define IS_RESERVED_END			IS_LAST_SOURCE
 
 /* DCC_CFG_PORT_CONFIG logical link states */
 #define LSTATE_DOWN    0x1
 #define LSTATE_INIT    0x2
 #define LSTATE_ARMED   0x3
 #define LSTATE_ACTIVE  0x4
+
+/* DCC_CFG_RESET reset states */
+#define LCB_RX_FPE_TX_FPE_INTO_RESET   (DCC_CFG_RESET_RESET_LCB    | \
+					DCC_CFG_RESET_RESET_TX_FPE | \
+					DCC_CFG_RESET_RESET_RX_FPE | \
+					DCC_CFG_RESET_ENABLE_CCLK_BCC)
+					/* 0x17 */
+
+#define LCB_RX_FPE_TX_FPE_OUT_OF_RESET  DCC_CFG_RESET_ENABLE_CCLK_BCC /* 0x10 */
 
 /* DC8051_STS_CUR_STATE port values (physical link states) */
 #define PLS_DISABLED			   0x30
@@ -204,6 +184,7 @@
 #define PLS_OFFLINE_READY_TO_QUIET_LT	   0x92
 #define PLS_OFFLINE_REPORT_FAILURE		   0x93
 #define PLS_OFFLINE_READY_TO_QUIET_BCC	   0x94
+#define PLS_OFFLINE_QUIET_DURATION	   0x95
 #define PLS_POLLING				   0x20
 #define PLS_POLLING_QUIET			   0x20
 #define PLS_POLLING_ACTIVE			   0x21
@@ -282,6 +263,7 @@
 #define HREQ_SET_TX_EQ_ABS	0x04
 #define HREQ_SET_TX_EQ_REL	0x05
 #define HREQ_ENABLE		0x06
+#define HREQ_LCB_RESET		0x07
 #define HREQ_CONFIG_DONE	0xfe
 #define HREQ_INTERFACE_TEST	0xff
 
@@ -334,6 +316,8 @@
 #define MAX_EAGER_BUFFER       (256 * 1024)
 #define MAX_EAGER_BUFFER_TOTAL (64 * (1 << 20)) /* max per ctxt 64MB */
 #define MAX_EXPECTED_BUFFER    (2048 * 1024)
+#define HFI1_MIN_HDRQ_EGRBUF_CNT 32
+#define HFI1_MAX_HDRQ_EGRBUF_CNT 16352
 
 /*
  * Receive expected base and count and eager base and count increment -
@@ -382,7 +366,7 @@
 #define TX_SETTINGS		     0x06
 #define VERIFY_CAP_LOCAL_PHY	     0x07
 #define VERIFY_CAP_LOCAL_FABRIC	     0x08
-#define VERIFY_CAP_LOCAL_LINK_WIDTH  0x09
+#define VERIFY_CAP_LOCAL_LINK_MODE   0x09
 #define LOCAL_DEVICE_ID		     0x0a
 #define RESERVED_REGISTERS	     0x0b
 #define LOCAL_LNI_INFO		     0x0c
@@ -507,6 +491,7 @@
 #define DOWN_REMOTE_REASON_SHIFT 16
 #define DOWN_REMOTE_REASON_MASK  0xff
 
+#define HOST_INTERFACE_VERSION 1
 #define HOST_INTERFACE_VERSION_SHIFT 16
 #define HOST_INTERFACE_VERSION_MASK  0xff
 
@@ -559,7 +544,7 @@ enum {
 /* timeouts */
 #define LINK_RESTART_DELAY 1000		/* link restart delay, in ms */
 #define TIMEOUT_8051_START 5000         /* 8051 start timeout, in ms */
-#define DC8051_COMMAND_TIMEOUT 20000	/* DC8051 command timeout, in ms */
+#define DC8051_COMMAND_TIMEOUT 1000	/* DC8051 command timeout, in ms */
 #define FREEZE_STATUS_TIMEOUT 20	/* wait for freeze indicators, in ms */
 #define VL_STATUS_CLEAR_TIMEOUT 5000	/* per-VL status clear, in ms */
 #define CCE_STATUS_TIMEOUT 10		/* time to clear CCE Status, in ms */
@@ -581,6 +566,10 @@ enum {
 #define LOOPBACK_SERDES 1
 #define LOOPBACK_LCB	2
 #define LOOPBACK_CABLE	3	/* external cable */
+
+/* set up bits in MISC_CONFIG_BITS */
+#define LOOPBACK_SERDES_CONFIG_BIT_MASK_SHIFT 0
+#define EXT_CFG_LCB_RESET_SUPPORTED_SHIFT     3
 
 /* read and write hardware registers */
 u64 read_csr(const struct hfi1_devdata *dd, u32 offset);
@@ -639,6 +628,40 @@ static inline void write_uctxt_csr(struct hfi1_devdata *dd, int ctxt,
 	/* user per-context CSRs are separated by 0x1000 */
 	write_csr(dd, offset0 + (0x1000 * ctxt), value);
 }
+
+static inline u32 chip_rcv_contexts(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, RCV_CONTEXTS);
+}
+
+static inline u32 chip_send_contexts(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, SEND_CONTEXTS);
+}
+
+static inline u32 chip_sdma_engines(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, SEND_DMA_ENGINES);
+}
+
+static inline u32 chip_pio_mem_size(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, SEND_PIO_MEM_SIZE);
+}
+
+static inline u32 chip_sdma_mem_size(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, SEND_DMA_MEM_SIZE);
+}
+
+static inline u32 chip_rcv_array_count(struct hfi1_devdata *dd)
+{
+	return read_csr(dd, RCV_ARRAY_CNT);
+}
+
+u8 encode_rcv_header_entry_size(u8 size);
+int hfi1_validate_rcvhdrcnt(struct hfi1_devdata *dd, uint thecnt);
+void set_hdrq_regs(struct hfi1_devdata *dd, u8 ctxt, u8 entsize, u16 hdrcnt);
 
 u64 create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
 	       u32 dw_len);
@@ -722,7 +745,7 @@ void handle_link_downgrade(struct work_struct *work);
 void handle_link_bounce(struct work_struct *work);
 void handle_start_link(struct work_struct *work);
 void handle_sma_message(struct work_struct *work);
-void reset_qsfp(struct hfi1_pportdata *ppd);
+int reset_qsfp(struct hfi1_pportdata *ppd);
 void qsfp_event(struct work_struct *work);
 void start_freeze_handling(struct hfi1_pportdata *ppd, int flags);
 int send_idle_sma(struct hfi1_devdata *dd, u64 message);
@@ -731,8 +754,8 @@ int read_8051_config(struct hfi1_devdata *, u8, u8, u32 *);
 int start_link(struct hfi1_pportdata *ppd);
 int bringup_serdes(struct hfi1_pportdata *ppd);
 void set_intr_state(struct hfi1_devdata *dd, u32 enable);
-void apply_link_downgrade_policy(struct hfi1_pportdata *ppd,
-				 int refresh_widths);
+bool apply_link_downgrade_policy(struct hfi1_pportdata *ppd,
+				 bool refresh_widths);
 void update_usrhead(struct hfi1_ctxtdata *rcd, u32 hd, u32 updegr, u32 egrhd,
 		    u32 intr_adjust, u32 npkts);
 int stop_drain_data_vls(struct hfi1_devdata *dd);
@@ -745,9 +768,9 @@ void clear_linkup_counters(struct hfi1_devdata *dd);
 u32 hdrqempty(struct hfi1_ctxtdata *rcd);
 int is_ax(struct hfi1_devdata *dd);
 int is_bx(struct hfi1_devdata *dd);
+bool is_urg_masked(struct hfi1_ctxtdata *rcd);
 u32 read_physical_state(struct hfi1_devdata *dd);
 u32 chip_to_opa_pstate(struct hfi1_devdata *dd, u32 chip_pstate);
-const char *opa_lstate_name(u32 lstate);
 const char *opa_pstate_name(u32 pstate);
 u32 driver_pstate(struct hfi1_pportdata *ppd);
 u32 driver_lstate(struct hfi1_pportdata *ppd);
@@ -756,11 +779,6 @@ int acquire_lcb_access(struct hfi1_devdata *dd, int sleep_ok);
 int release_lcb_access(struct hfi1_devdata *dd, int sleep_ok);
 #define LCB_START DC_LCB_CSRS
 #define LCB_END   DC_8051_CSRS /* next block is 8051 */
-static inline int is_lcb_offset(u32 offset)
-{
-	return (offset >= LCB_START && offset < LCB_END);
-}
-
 extern uint num_vls;
 
 extern uint disable_integrity;
@@ -798,6 +816,10 @@ static inline int idx_from_vl(int vl)
 /* Per device counter indexes */
 enum {
 	C_RCV_OVF = 0,
+	C_RX_LEN_ERR,
+	C_RX_SHORT_ERR,
+	C_RX_ICRC_ERR,
+	C_RX_EBP,
 	C_RX_TID_FULL,
 	C_RX_TID_INVALID,
 	C_RX_TID_FLGMS,
@@ -863,10 +885,12 @@ enum {
 	C_DC_PG_STS_TX_MBE_CNT,
 	C_SW_CPU_INTR,
 	C_SW_CPU_RCV_LIM,
+	C_SW_CTX0_SEQ_DROP,
 	C_SW_VTX_WAIT,
 	C_SW_PIO_WAIT,
 	C_SW_PIO_DRAIN,
 	C_SW_KMEM_WAIT,
+	C_SW_TID_WAIT,
 	C_SW_SEND_SCHED,
 	C_SDMA_DESC_FETCHED_CNT,
 	C_SDMA_INT_CNT,
@@ -1181,6 +1205,7 @@ enum {
 	C_SW_IBP_RDMA_SEQ,
 	C_SW_IBP_UNALIGNED,
 	C_SW_IBP_SEQ_NAK,
+	C_SW_IBP_RC_CRWAITS,
 	C_SW_CPU_RC_ACKS,
 	C_SW_CPU_RC_QACKS,
 	C_SW_CPU_RC_DELAYED_COMP,
@@ -1369,6 +1394,21 @@ int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt);
 void hfi1_read_link_quality(struct hfi1_devdata *dd, u8 *link_quality);
 void hfi1_init_vnic_rsm(struct hfi1_devdata *dd);
 void hfi1_deinit_vnic_rsm(struct hfi1_devdata *dd);
+
+irqreturn_t general_interrupt(int irq, void *data);
+irqreturn_t sdma_interrupt(int irq, void *data);
+irqreturn_t receive_context_interrupt(int irq, void *data);
+irqreturn_t receive_context_thread(int irq, void *data);
+irqreturn_t receive_context_interrupt_napi(int irq, void *data);
+
+int set_intr_bits(struct hfi1_devdata *dd, u16 first, u16 last, bool set);
+void init_qsfp_int(struct hfi1_devdata *dd);
+void remap_intr(struct hfi1_devdata *dd, int isrc, int msix_intr);
+void remap_sdma_interrupts(struct hfi1_devdata *dd, int engine, int msix_intr);
+void reset_interrupts(struct hfi1_devdata *dd);
+u8 hfi1_get_qp_map(struct hfi1_devdata *dd, u8 idx);
+void hfi1_init_aip_rsm(struct hfi1_devdata *dd);
+void hfi1_deinit_aip_rsm(struct hfi1_devdata *dd);
 
 /*
  * Interrupt source table.

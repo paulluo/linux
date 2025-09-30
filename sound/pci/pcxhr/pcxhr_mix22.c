@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Digigram pcxhr compatible soundcards
  *
  * mixer interface for stereo cards
  *
  * Copyright (c) 2004 by Digigram <alsa@digigram.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/delay.h>
@@ -548,7 +535,7 @@ int hr222_update_analog_audio_level(struct snd_pcxhr *chip,
 {
 	dev_dbg(chip->card->dev,
 		"hr222_update_analog_audio_level(%s chan=%d)\n",
-		    is_capture ? "capture" : "playback", channel);
+		snd_pcm_direction_name(is_capture), channel);
 	if (is_capture) {
 		int level_l, level_r, level_mic;
 		/* we have to update all levels */

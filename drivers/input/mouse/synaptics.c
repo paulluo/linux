@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Synaptics TouchPad PS/2 mouse driver
  *
@@ -15,10 +16,6 @@
  *   Copyright (c) 1997 C. Scott Ananian <cananian@alumni.priceton.edu>
  *   Copyright (c) 1998-2000 Bruce Kalk <kall@compass.com>
  *     code for the special synaptics commands (from the tpconfig-source)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  *
  * Trademarks are the property of their respective owners.
  */
@@ -84,7 +81,7 @@ static int synaptics_mode_cmd(struct psmouse *psmouse, u8 mode)
 	u8 param[1];
 	int error;
 
-	error = psmouse_sliced_command(psmouse, mode);
+	error = ps2_sliced_command(&psmouse->ps2dev, mode);
 	if (error)
 		return error;
 
@@ -99,9 +96,7 @@ static int synaptics_mode_cmd(struct psmouse *psmouse, u8 mode)
 int synaptics_detect(struct psmouse *psmouse, bool set_properties)
 {
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	u8 param[4];
-
-	param[0] = 0;
+	u8 param[4] = { 0 };
 
 	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
 	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
@@ -151,7 +146,6 @@ static const char * const topbuttonpad_pnp_ids[] = {
 	"LEN0042", /* Yoga */
 	"LEN0045",
 	"LEN0047",
-	"LEN0049",
 	"LEN2000", /* S540 */
 	"LEN2001", /* Edge E431 */
 	"LEN2002", /* Edge E531 */
@@ -167,14 +161,48 @@ static const char * const topbuttonpad_pnp_ids[] = {
 	NULL
 };
 
+#ifdef CONFIG_MOUSE_PS2_SYNAPTICS_SMBUS
 static const char * const smbus_pnp_ids[] = {
 	/* all of the topbuttonpad_pnp_ids are valid, we just add some extras */
+	"DLL060d", /* Dell Precision M3800 */
 	"LEN0048", /* X1 Carbon 3 */
 	"LEN0046", /* X250 */
+	"LEN0049", /* Yoga 11e */
 	"LEN004a", /* W541 */
+	"LEN005b", /* P50 */
+	"LEN005e", /* T560 */
+	"LEN006c", /* T470s */
+	"LEN007a", /* T470s */
+	"LEN0071", /* T480 */
+	"LEN0072", /* X1 Carbon Gen 5 (2017) - Elan/ALPS trackpoint */
+	"LEN0073", /* X1 Carbon G5 (Elantech) */
+	"LEN0091", /* X1 Carbon 6 */
+	"LEN0092", /* X1 Carbon 6 */
+	"LEN0093", /* T480 */
+	"LEN0096", /* X280 */
+	"LEN0097", /* X280 -> ALPS trackpoint */
+	"LEN0099", /* X1 Extreme Gen 1 / P1 Gen 1 */
+	"LEN009b", /* T580 */
+	"LEN0402", /* X1 Extreme Gen 2 / P1 Gen 2 */
+	"LEN040f", /* P1 Gen 3 */
+	"LEN0411", /* L14 Gen 1 */
 	"LEN200f", /* T450s */
+	"LEN2044", /* L470  */
+	"LEN2054", /* E480 */
+	"LEN2055", /* E580 */
+	"LEN2068", /* T14 Gen 1 */
+	"SYN1221", /* TUXEDO InfinityBook Pro 14 v5 */
+	"SYN3003", /* HP EliteBook 850 G1 */
+	"SYN3015", /* HP EliteBook 840 G2 */
+	"SYN3052", /* HP EliteBook 840 G4 */
+	"SYN3221", /* HP 15-ay000 */
+	"SYN323d", /* HP Spectre X360 13-w013dx */
+	"SYN3257", /* HP Envy 13-ad105ng */
+	"TOS01f6", /* Dynabook Portege X30L-G */
+	"TOS0213", /* Dynabook Portege X30-D */
 	NULL
 };
+#endif
 
 static const char * const forcepad_pnp_ids[] = {
 	"SYN300D",
@@ -183,13 +211,13 @@ static const char * const forcepad_pnp_ids[] = {
 };
 
 /*
- * Send a command to the synpatics touchpad by special commands
+ * Send a command to the synaptics touchpad by special commands
  */
 static int synaptics_send_cmd(struct psmouse *psmouse, u8 cmd, u8 *param)
 {
 	int error;
 
-	error = psmouse_sliced_command(psmouse, cmd);
+	error = ps2_sliced_command(&psmouse->ps2dev, cmd);
 	if (error)
 		return error;
 
@@ -546,7 +574,7 @@ static int synaptics_set_advanced_gesture_mode(struct psmouse *psmouse)
 	static u8 param = 0xc8;
 	int error;
 
-	error = psmouse_sliced_command(psmouse, SYN_QUE_MODEL);
+	error = ps2_sliced_command(&psmouse->ps2dev, SYN_QUE_MODEL);
 	if (error)
 		return error;
 
@@ -609,11 +637,11 @@ static void synaptics_set_rate(struct psmouse *psmouse, unsigned int rate)
  ****************************************************************************/
 static int synaptics_pt_write(struct serio *serio, u8 c)
 {
-	struct psmouse *parent = serio_get_drvdata(serio->parent);
+	struct psmouse *parent = psmouse_from_serio(serio->parent);
 	u8 rate_param = SYN_PS_CLIENT_CMD; /* indicates that we want pass-through port */
 	int error;
 
-	error = psmouse_sliced_command(parent, c);
+	error = ps2_sliced_command(&parent->ps2dev, c);
 	if (error)
 		return error;
 
@@ -626,24 +654,42 @@ static int synaptics_pt_write(struct serio *serio, u8 c)
 
 static int synaptics_pt_start(struct serio *serio)
 {
-	struct psmouse *parent = serio_get_drvdata(serio->parent);
+	struct psmouse *parent = psmouse_from_serio(serio->parent);
 	struct synaptics_data *priv = parent->private;
 
-	serio_pause_rx(parent->ps2dev.serio);
+	guard(serio_pause_rx)(parent->ps2dev.serio);
 	priv->pt_port = serio;
-	serio_continue_rx(parent->ps2dev.serio);
 
 	return 0;
 }
 
 static void synaptics_pt_stop(struct serio *serio)
 {
-	struct psmouse *parent = serio_get_drvdata(serio->parent);
+	struct psmouse *parent = psmouse_from_serio(serio->parent);
 	struct synaptics_data *priv = parent->private;
 
-	serio_pause_rx(parent->ps2dev.serio);
+	guard(serio_pause_rx)(parent->ps2dev.serio);
 	priv->pt_port = NULL;
-	serio_continue_rx(parent->ps2dev.serio);
+}
+
+static int synaptics_pt_open(struct serio *serio)
+{
+	struct psmouse *parent = psmouse_from_serio(serio->parent);
+	struct synaptics_data *priv = parent->private;
+
+	guard(serio_pause_rx)(parent->ps2dev.serio);
+	priv->pt_port_open = true;
+
+	return 0;
+}
+
+static void synaptics_pt_close(struct serio *serio)
+{
+	struct psmouse *parent = psmouse_from_serio(serio->parent);
+	struct synaptics_data *priv = parent->private;
+
+	guard(serio_pause_rx)(parent->ps2dev.serio);
+	priv->pt_port_open = false;
 }
 
 static int synaptics_is_pt_packet(u8 *buf)
@@ -651,25 +697,32 @@ static int synaptics_is_pt_packet(u8 *buf)
 	return (buf[0] & 0xFC) == 0x84 && (buf[3] & 0xCC) == 0xC4;
 }
 
-static void synaptics_pass_pt_packet(struct serio *ptport, u8 *packet)
+static void synaptics_pass_pt_packet(struct synaptics_data *priv, u8 *packet)
 {
-	struct psmouse *child = serio_get_drvdata(ptport);
+	struct serio *ptport;
 
-	if (child && child->state == PSMOUSE_ACTIVATED) {
-		serio_interrupt(ptport, packet[1], 0);
-		serio_interrupt(ptport, packet[4], 0);
-		serio_interrupt(ptport, packet[5], 0);
-		if (child->pktsize == 4)
-			serio_interrupt(ptport, packet[2], 0);
-	} else {
-		serio_interrupt(ptport, packet[1], 0);
+	ptport = priv->pt_port;
+	if (!ptport)
+		return;
+
+	serio_interrupt(ptport, packet[1], 0);
+
+	if (priv->pt_port_open) {
+		struct psmouse *child = psmouse_from_serio(ptport);
+
+		if (child->state == PSMOUSE_ACTIVATED) {
+			serio_interrupt(ptport, packet[4], 0);
+			serio_interrupt(ptport, packet[5], 0);
+			if (child->pktsize == 4)
+				serio_interrupt(ptport, packet[2], 0);
+		}
 	}
 }
 
 static void synaptics_pt_activate(struct psmouse *psmouse)
 {
 	struct synaptics_data *priv = psmouse->private;
-	struct psmouse *child = serio_get_drvdata(priv->pt_port);
+	struct psmouse *child = psmouse_from_serio(priv->pt_port);
 
 	/* adjust the touchpad to child's choice of protocol */
 	if (child) {
@@ -688,7 +741,7 @@ static void synaptics_pt_create(struct psmouse *psmouse)
 {
 	struct serio *serio;
 
-	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
+	serio = kzalloc(sizeof(*serio), GFP_KERNEL);
 	if (!serio) {
 		psmouse_err(psmouse,
 			    "not enough memory for pass-through port\n");
@@ -696,11 +749,13 @@ static void synaptics_pt_create(struct psmouse *psmouse)
 	}
 
 	serio->id.type = SERIO_PS_PSTHRU;
-	strlcpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
-	strlcpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->name));
+	strscpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
+	strscpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->phys));
 	serio->write = synaptics_pt_write;
 	serio->start = synaptics_pt_start;
 	serio->stop = synaptics_pt_stop;
+	serio->open = synaptics_pt_open;
+	serio->close = synaptics_pt_close;
 	serio->parent = psmouse->ps2dev.serio;
 
 	psmouse->pt_activate = synaptics_pt_activate;
@@ -1088,8 +1143,11 @@ static void synaptics_process_packet(struct psmouse *psmouse)
 					num_fingers = hw.w + 2;
 				break;
 			case 2:
-				if (SYN_MODEL_PEN(info->model_id))
-					;   /* Nothing, treat a pen as a single finger */
+				/*
+				 * SYN_MODEL_PEN(info->model_id): even if
+				 * the device supports pen, we treat it as
+				 * a single finger.
+				 */
 				break;
 			case 4 ... 15:
 				if (SYN_CAP_PALMDETECT(info->capabilities))
@@ -1194,11 +1252,10 @@ static psmouse_ret_t synaptics_process_byte(struct psmouse *psmouse)
 
 		if (SYN_CAP_PASS_THROUGH(priv->info.capabilities) &&
 		    synaptics_is_pt_packet(psmouse->packet)) {
-			if (priv->pt_port)
-				synaptics_pass_pt_packet(priv->pt_port,
-							 psmouse->packet);
-		} else
+			synaptics_pass_pt_packet(priv, psmouse->packet);
+		} else {
 			synaptics_process_packet(psmouse);
+		}
 
 		return PSMOUSE_FULL_PACKET;
 	}
@@ -1227,32 +1284,39 @@ static void set_abs_position_params(struct input_dev *dev,
 	input_abs_set_res(dev, y_code, info->y_res);
 }
 
-static void set_input_params(struct psmouse *psmouse,
-			     struct synaptics_data *priv)
+static int set_input_params(struct psmouse *psmouse,
+			    struct synaptics_data *priv)
 {
 	struct input_dev *dev = psmouse->dev;
 	struct synaptics_device_info *info = &priv->info;
 	int i;
+	int error;
+
+	/* Reset default psmouse capabilities */
+	__clear_bit(EV_REL, dev->evbit);
+	bitmap_zero(dev->relbit, REL_CNT);
+	bitmap_zero(dev->keybit, KEY_CNT);
 
 	/* Things that apply to both modes */
 	__set_bit(INPUT_PROP_POINTER, dev->propbit);
-	__set_bit(EV_KEY, dev->evbit);
-	__set_bit(BTN_LEFT, dev->keybit);
-	__set_bit(BTN_RIGHT, dev->keybit);
 
-	if (SYN_CAP_MIDDLE_BUTTON(info->capabilities))
-		__set_bit(BTN_MIDDLE, dev->keybit);
+	input_set_capability(dev, EV_KEY, BTN_LEFT);
+
+	/* Clickpads report only left button */
+	if (!SYN_CAP_CLICKPAD(info->ext_cap_0c)) {
+		input_set_capability(dev, EV_KEY, BTN_RIGHT);
+		if (SYN_CAP_MIDDLE_BUTTON(info->capabilities))
+			input_set_capability(dev, EV_KEY, BTN_MIDDLE);
+	}
 
 	if (!priv->absolute_mode) {
 		/* Relative mode */
-		__set_bit(EV_REL, dev->evbit);
-		__set_bit(REL_X, dev->relbit);
-		__set_bit(REL_Y, dev->relbit);
-		return;
+		input_set_capability(dev, EV_REL, REL_X);
+		input_set_capability(dev, EV_REL, REL_Y);
+		return 0;
 	}
 
 	/* Absolute mode */
-	__set_bit(EV_ABS, dev->evbit);
 	set_abs_position_params(dev, &priv->info, ABS_X, ABS_Y);
 	input_set_abs_params(dev, ABS_PRESSURE, 0, 255, 0, 0);
 
@@ -1264,11 +1328,15 @@ static void set_input_params(struct psmouse *psmouse,
 					ABS_MT_POSITION_X, ABS_MT_POSITION_Y);
 		/* Image sensors can report per-contact pressure */
 		input_set_abs_params(dev, ABS_MT_PRESSURE, 0, 255, 0, 0);
-		input_mt_init_slots(dev, 2, INPUT_MT_POINTER | INPUT_MT_TRACK);
+
+		error = input_mt_init_slots(dev, 2,
+					    INPUT_MT_POINTER | INPUT_MT_TRACK);
+		if (error)
+			return error;
 
 		/* Image sensors can signal 4 and 5 finger clicks */
-		__set_bit(BTN_TOOL_QUADTAP, dev->keybit);
-		__set_bit(BTN_TOOL_QUINTTAP, dev->keybit);
+		input_set_capability(dev, EV_KEY, BTN_TOOL_QUADTAP);
+		input_set_capability(dev, EV_KEY, BTN_TOOL_QUINTTAP);
 	} else if (SYN_CAP_ADV_GESTURE(info->ext_cap_0c)) {
 		set_abs_position_params(dev, info,
 					ABS_MT_POSITION_X, ABS_MT_POSITION_Y);
@@ -1276,46 +1344,54 @@ static void set_input_params(struct psmouse *psmouse,
 		 * Profile sensor in CR-48 tracks contacts reasonably well,
 		 * other non-image sensors with AGM use semi-mt.
 		 */
-		input_mt_init_slots(dev, 2,
-				    INPUT_MT_POINTER |
-				    (cr48_profile_sensor ?
-					INPUT_MT_TRACK : INPUT_MT_SEMI_MT));
+		error = input_mt_init_slots(dev, 2,
+					    INPUT_MT_POINTER |
+					     (cr48_profile_sensor ?
+					      INPUT_MT_TRACK :
+					      INPUT_MT_SEMI_MT));
+		if (error)
+			return error;
+
+		/*
+		 * For semi-mt devices we send ABS_X/Y ourselves instead of
+		 * input_mt_report_pointer_emulation. But
+		 * input_mt_init_slots() resets the fuzz to 0, leading to a
+		 * filtered ABS_MT_POSITION_X but an unfiltered ABS_X
+		 * position. Let's re-initialize ABS_X/Y here.
+		 */
+		if (!cr48_profile_sensor)
+			set_abs_position_params(dev, &priv->info, ABS_X, ABS_Y);
 	}
 
 	if (SYN_CAP_PALMDETECT(info->capabilities))
 		input_set_abs_params(dev, ABS_TOOL_WIDTH, 0, 15, 0, 0);
 
-	__set_bit(BTN_TOUCH, dev->keybit);
-	__set_bit(BTN_TOOL_FINGER, dev->keybit);
+	input_set_capability(dev, EV_KEY, BTN_TOUCH);
+	input_set_capability(dev, EV_KEY, BTN_TOOL_FINGER);
 
 	if (synaptics_has_multifinger(priv)) {
-		__set_bit(BTN_TOOL_DOUBLETAP, dev->keybit);
-		__set_bit(BTN_TOOL_TRIPLETAP, dev->keybit);
+		input_set_capability(dev, EV_KEY, BTN_TOOL_DOUBLETAP);
+		input_set_capability(dev, EV_KEY, BTN_TOOL_TRIPLETAP);
 	}
 
 	if (SYN_CAP_FOUR_BUTTON(info->capabilities) ||
 	    SYN_CAP_MIDDLE_BUTTON(info->capabilities)) {
-		__set_bit(BTN_FORWARD, dev->keybit);
-		__set_bit(BTN_BACK, dev->keybit);
+		input_set_capability(dev, EV_KEY, BTN_FORWARD);
+		input_set_capability(dev, EV_KEY, BTN_BACK);
 	}
 
 	if (!SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10))
 		for (i = 0; i < SYN_CAP_MULTI_BUTTON_NO(info->ext_cap); i++)
-			__set_bit(BTN_0 + i, dev->keybit);
-
-	__clear_bit(EV_REL, dev->evbit);
-	__clear_bit(REL_X, dev->relbit);
-	__clear_bit(REL_Y, dev->relbit);
+			input_set_capability(dev, EV_KEY, BTN_0 + i);
 
 	if (SYN_CAP_CLICKPAD(info->ext_cap_0c)) {
 		__set_bit(INPUT_PROP_BUTTONPAD, dev->propbit);
 		if (psmouse_matches_pnp_id(psmouse, topbuttonpad_pnp_ids) &&
 		    !SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10))
 			__set_bit(INPUT_PROP_TOPBUTTONPAD, dev->propbit);
-		/* Clickpads report only left button */
-		__clear_bit(BTN_RIGHT, dev->keybit);
-		__clear_bit(BTN_MIDDLE, dev->keybit);
 	}
+
+	return 0;
 }
 
 static ssize_t synaptics_show_disable_gesture(struct psmouse *psmouse,
@@ -1521,7 +1597,7 @@ static int synaptics_init_ps2(struct psmouse *psmouse,
 
 	synaptics_apply_quirks(psmouse, info);
 
-	psmouse->private = priv = kzalloc(sizeof(struct synaptics_data), GFP_KERNEL);
+	psmouse->private = priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1553,7 +1629,12 @@ static int synaptics_init_ps2(struct psmouse *psmouse,
 		     info->capabilities, info->ext_cap, info->ext_cap_0c,
 		     info->ext_cap_10, info->board_id, info->firmware_id);
 
-	set_input_params(psmouse, priv);
+	err = set_input_params(psmouse, priv);
+	if (err) {
+		psmouse_err(psmouse,
+			    "failed to set up capabilities: %d\n", err);
+		goto init_fail;
+	}
 
 	/*
 	 * Encode touchpad model so that it can be used to set
@@ -1577,6 +1658,7 @@ static int synaptics_init_ps2(struct psmouse *psmouse,
 	psmouse->set_rate = synaptics_set_rate;
 	psmouse->disconnect = synaptics_disconnect;
 	psmouse->reconnect = synaptics_reconnect;
+	psmouse->fast_reconnect = NULL;
 	psmouse->cleanup = synaptics_reset;
 	/* Synaptics can usually stay in sync without extra help */
 	psmouse->resync_time = 0;
@@ -1706,14 +1788,14 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
 		psmouse_matches_pnp_id(psmouse, topbuttonpad_pnp_ids) &&
 		!SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10);
 	const struct rmi_device_platform_data pdata = {
+		.reset_delay_ms = 30,
 		.sensor_pdata = {
 			.sensor_type = rmi_sensor_touchpad,
 			.axis_align.flip_y = true,
-			/* to prevent cursors jumps: */
-			.kernel_tracking = true,
+			.kernel_tracking = false,
 			.topbuttonpad = topbuttonpad,
 		},
-		.f30_data = {
+		.gpio_data = {
 			.buttonpad = SYN_CAP_CLICKPAD(info->ext_cap_0c),
 			.trackstick_buttons =
 				!!SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10),
@@ -1725,11 +1807,11 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
 	};
 
 	return psmouse_smbus_init(psmouse, &intertouch_board,
-				  &pdata, sizeof(pdata),
+				  &pdata, sizeof(pdata), true,
 				  leave_breadcrumbs);
 }
 
-/**
+/*
  * synaptics_setup_intertouch - called once the PS/2 devices are enumerated
  * and decides to instantiate a SMBus InterTouch device.
  */

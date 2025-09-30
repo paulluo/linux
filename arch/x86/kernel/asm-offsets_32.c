@@ -1,28 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 #ifndef __LINUX_KBUILD_H
 # error "Please do not build this file directly, build asm-offsets.c instead"
 #endif
 
-#include <asm/ucontext.h>
+#include <linux/efi.h>
 
-#define __SYSCALL_I386(nr, sym, qual) [nr] = 1,
-static char syscalls[] = {
-#include <asm/syscalls_32.h>
-};
+#include <asm/ucontext.h>
 
 /* workaround for a warning with -Wmissing-prototypes */
 void foo(void);
 
 void foo(void)
 {
-	OFFSET(CPUINFO_x86, cpuinfo_x86, x86);
-	OFFSET(CPUINFO_x86_vendor, cpuinfo_x86, x86_vendor);
-	OFFSET(CPUINFO_x86_model, cpuinfo_x86, x86_model);
-	OFFSET(CPUINFO_x86_mask, cpuinfo_x86, x86_mask);
-	OFFSET(CPUINFO_cpuid_level, cpuinfo_x86, cpuid_level);
-	OFFSET(CPUINFO_x86_capability, cpuinfo_x86, x86_capability);
-	OFFSET(CPUINFO_x86_vendor_id, cpuinfo_x86, x86_vendor_id);
-	BLANK();
-
 	OFFSET(PT_EBX, pt_regs, bx);
 	OFFSET(PT_ECX, pt_regs, cx);
 	OFFSET(PT_EDX, pt_regs, dx);
@@ -45,21 +34,16 @@ void foo(void)
 	OFFSET(saved_context_gdt_desc, saved_context, gdt_desc);
 	BLANK();
 
-	/* Offset from the sysenter stack to tss.sp0 */
-	DEFINE(TSS_sysenter_sp0, offsetof(struct tss_struct, x86_tss.sp0) -
-	       offsetofend(struct tss_struct, SYSENTER_stack));
-
-	/* Offset from cpu_tss to SYSENTER_stack */
-	OFFSET(CPU_TSS_SYSENTER_stack, tss_struct, SYSENTER_stack);
-	/* Size of SYSENTER_stack */
-	DEFINE(SIZEOF_SYSENTER_stack, sizeof(((struct tss_struct *)0)->SYSENTER_stack));
-
-#ifdef CONFIG_CC_STACKPROTECTOR
-	BLANK();
-	OFFSET(stack_canary_offset, stack_canary, canary);
-#endif
+	/*
+	 * Offset from the entry stack to task stack stored in TSS. Kernel entry
+	 * happens on the per-cpu entry-stack, and the asm code switches to the
+	 * task-stack pointer stored in x86_tss.sp1, which is a copy of
+	 * task->thread.sp0 where entry code can find it.
+	 */
+	DEFINE(TSS_entry2task_stack,
+	       offsetof(struct cpu_entry_area, tss.x86_tss.sp1) -
+	       offsetofend(struct cpu_entry_area, entry_stack_page.stack));
 
 	BLANK();
-	DEFINE(__NR_syscall_max, sizeof(syscalls) - 1);
-	DEFINE(NR_syscalls, sizeof(syscalls));
+	DEFINE(EFI_svam, offsetof(efi_runtime_services_t, set_virtual_address_map));
 }

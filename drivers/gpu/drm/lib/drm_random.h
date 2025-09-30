@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __DRM_RANDOM_H__
 #define __DRM_RANDOM_H__
 
@@ -5,7 +6,7 @@
  * be transposed to lib/ at the earliest convenience.
  */
 
-#include <linux/random.h>
+#include <linux/prandom.h>
 
 #define DRM_RND_STATE_INITIALIZER(seed__) ({				\
 	struct rnd_state state__;					\
@@ -21,5 +22,7 @@ unsigned int *drm_random_order(unsigned int count,
 void drm_random_reorder(unsigned int *order,
 			unsigned int count,
 			struct rnd_state *state);
+u32 drm_prandom_u32_max_state(u32 ep_ro,
+			      struct rnd_state *state);
 
 #endif /* !__DRM_RANDOM_H__ */

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Horst Hummel <Horst.Hummel@de.ibm.com>
@@ -8,8 +9,7 @@
  *
  */
 
-#define KMSG_COMPONENT "dasd"
-
+#include <linux/export.h>
 #include <linux/ctype.h>
 #include <linux/init.h>
 
@@ -17,13 +17,10 @@
 #include <asm/ebcdic.h>
 #include <linux/uaccess.h>
 
-/* This is ugly... */
-#define PRINTK_HEADER "dasd_erp:"
-
 #include "dasd_int.h"
 
 struct dasd_ccw_req *
-dasd_alloc_erp_request(char *magic, int cplength, int datasize,
+dasd_alloc_erp_request(unsigned int magic, int cplength, int datasize,
 		       struct dasd_device * device)
 {
 	unsigned long flags;
@@ -32,8 +29,8 @@ dasd_alloc_erp_request(char *magic, int cplength, int datasize,
 	int size;
 
 	/* Sanity checks */
-	BUG_ON( magic == NULL || datasize > PAGE_SIZE ||
-	     (cplength*sizeof(struct ccw1)) > PAGE_SIZE);
+	BUG_ON(datasize > PAGE_SIZE ||
+	       (cplength*sizeof(struct ccw1)) > PAGE_SIZE);
 
 	size = (sizeof(struct dasd_ccw_req) + 7L) & -8L;
 	if (cplength > 0)
@@ -61,7 +58,7 @@ dasd_alloc_erp_request(char *magic, int cplength, int datasize,
 		cqr->data = data;
  		memset(cqr->data, 0, datasize);
 	}
-	strncpy((char *) &cqr->magic, magic, 4);
+	cqr->magic = magic;
 	ASCEBC((char *) &cqr->magic, 4);
 	set_bit(DASD_CQR_FLAGS_USE_ERP, &cqr->flags);
 	dasd_get_device(device);
@@ -169,12 +166,12 @@ dasd_log_sense(struct dasd_ccw_req *cqr, struct irb *irb)
 	device = cqr->startdev;
 	if (cqr->intrc == -ETIMEDOUT) {
 		dev_err(&device->cdev->dev,
-			"A timeout error occurred for cqr %p\n", cqr);
+			"A timeout error occurred for cqr %px\n", cqr);
 		return;
 	}
 	if (cqr->intrc == -ENOLINK) {
 		dev_err(&device->cdev->dev,
-			"A transport error occurred for cqr %p\n", cqr);
+			"A transport error occurred for cqr %px\n", cqr);
 		return;
 	}
 	/* dump sense data */

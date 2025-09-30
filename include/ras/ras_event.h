@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM ras
 #define TRACE_INCLUDE_FILE ras_event
@@ -26,7 +27,7 @@
 TRACE_EVENT(extlog_mem_event,
 	TP_PROTO(struct cper_sec_mem_err *mem,
 		 u32 err_seq,
-		 const uuid_le *fru_id,
+		 const guid_t *fru_id,
 		 const char *fru_text,
 		 u8 sev),
 
@@ -38,7 +39,7 @@ TRACE_EVENT(extlog_mem_event,
 		__field(u8, sev)
 		__field(u64, pa)
 		__field(u8, pa_mask_lsb)
-		__field_struct(uuid_le, fru_id)
+		__field_struct(guid_t, fru_id)
 		__string(fru_text, fru_text)
 		__field_struct(struct cper_mem_err_compact, data)
 	),
@@ -60,7 +61,7 @@ TRACE_EVENT(extlog_mem_event,
 		else
 			__entry->pa_mask_lsb = ~0;
 		__entry->fru_id = *fru_id;
-		__assign_str(fru_text, fru_text);
+		__assign_str(fru_text);
 		cper_mem_err_pack(mem, &__entry->data);
 	),
 
@@ -130,8 +131,8 @@ TRACE_EVENT(mc_event,
 
 	TP_fast_assign(
 		__entry->error_type		= err_type;
-		__assign_str(msg, error_msg);
-		__assign_str(label, label);
+		__assign_str(msg);
+		__assign_str(label);
 		__entry->error_count		= error_count;
 		__entry->mc_index		= mc_index;
 		__entry->top_layer		= top_layer;
@@ -140,7 +141,7 @@ TRACE_EVENT(mc_event,
 		__entry->address		= address;
 		__entry->grain_bits		= grain_bits;
 		__entry->syndrome		= syndrome;
-		__assign_str(driver_detail, driver_detail);
+		__assign_str(driver_detail);
 	),
 
 	TP_printk("%d %s error%s:%s%s on %s (mc:%d location:%d:%d:%d address:0x%08lx grain:%d syndrome:0x%08lx%s%s)",
@@ -217,8 +218,8 @@ TRACE_EVENT(arm_event,
  */
 TRACE_EVENT(non_standard_event,
 
-	TP_PROTO(const uuid_le *sec_type,
-		 const uuid_le *fru_id,
+	TP_PROTO(const guid_t *sec_type,
+		 const guid_t *fru_id,
 		 const char *fru_text,
 		 const u8 sev,
 		 const u8 *err,
@@ -238,7 +239,7 @@ TRACE_EVENT(non_standard_event,
 	TP_fast_assign(
 		memcpy(__entry->sec_type, sec_type, UUID_SIZE);
 		memcpy(__entry->fru_id, fru_id, UUID_SIZE);
-		__assign_str(fru_text, fru_text);
+		__assign_str(fru_text);
 		__entry->sev = sev;
 		__entry->len = len;
 		memcpy(__get_dynamic_array(buf), err, len);
@@ -251,6 +252,7 @@ TRACE_EVENT(non_standard_event,
 		  __print_hex(__get_dynamic_array(buf), __entry->len))
 );
 
+#ifdef CONFIG_PCIEAER
 /*
  * PCIe AER Trace event
  *
@@ -297,31 +299,46 @@ TRACE_EVENT(non_standard_event,
 TRACE_EVENT(aer_event,
 	TP_PROTO(const char *dev_name,
 		 const u32 status,
-		 const u8 severity),
+		 const u8 severity,
+		 const u8 tlp_header_valid,
+		 struct pcie_tlp_log *tlp),
 
-	TP_ARGS(dev_name, status, severity),
+	TP_ARGS(dev_name, status, severity, tlp_header_valid, tlp),
 
 	TP_STRUCT__entry(
 		__string(	dev_name,	dev_name	)
 		__field(	u32,		status		)
 		__field(	u8,		severity	)
+		__field(	u8, 		tlp_header_valid)
+		__array(	u32, 		tlp_header, PCIE_STD_MAX_TLP_HEADERLOG)
 	),
 
 	TP_fast_assign(
-		__assign_str(dev_name, dev_name);
+		__assign_str(dev_name);
 		__entry->status		= status;
 		__entry->severity	= severity;
+		__entry->tlp_header_valid = tlp_header_valid;
+		if (tlp_header_valid) {
+			int i;
+
+			for (i = 0; i < PCIE_STD_MAX_TLP_HEADERLOG; i++)
+				__entry->tlp_header[i] = tlp->dw[i];
+		}
 	),
 
-	TP_printk("%s PCIe Bus Error: severity=%s, %s\n",
+	TP_printk("%s PCIe Bus Error: severity=%s, %s, TLP Header=%s\n",
 		__get_str(dev_name),
 		__entry->severity == AER_CORRECTABLE ? "Corrected" :
 			__entry->severity == AER_FATAL ?
 			"Fatal" : "Uncorrected, non-fatal",
 		__entry->severity == AER_CORRECTABLE ?
 		__print_flags(__entry->status, "|", aer_correctable_errors) :
-		__print_flags(__entry->status, "|", aer_uncorrectable_errors))
+		__print_flags(__entry->status, "|", aer_uncorrectable_errors),
+		__entry->tlp_header_valid ?
+			__print_array(__entry->tlp_header, PCIE_STD_MAX_TLP_HEADERLOG, 4) :
+			"Not available")
 );
+#endif /* CONFIG_PCIEAER */
 
 /*
  * memory-failure recovery action result event
@@ -341,11 +358,9 @@ TRACE_EVENT(aer_event,
 #define MF_PAGE_TYPE		\
 	EM ( MF_MSG_KERNEL, "reserved kernel page" )			\
 	EM ( MF_MSG_KERNEL_HIGH_ORDER, "high-order kernel page" )	\
-	EM ( MF_MSG_SLAB, "kernel slab page" )				\
-	EM ( MF_MSG_DIFFERENT_COMPOUND, "different compound page after locking" ) \
-	EM ( MF_MSG_POISONED_HUGE, "huge page already hardware poisoned" )	\
 	EM ( MF_MSG_HUGE, "huge page" )					\
 	EM ( MF_MSG_FREE_HUGE, "free huge page" )			\
+	EM ( MF_MSG_GET_HWPOISON, "get hwpoison page" )			\
 	EM ( MF_MSG_UNMAP_FAILED, "unmapping failed page" )		\
 	EM ( MF_MSG_DIRTY_SWAPCACHE, "dirty swapcache page" )		\
 	EM ( MF_MSG_CLEAN_SWAPCACHE, "clean swapcache page" )		\
@@ -357,7 +372,9 @@ TRACE_EVENT(aer_event,
 	EM ( MF_MSG_CLEAN_LRU, "clean LRU page" )			\
 	EM ( MF_MSG_TRUNCATED_LRU, "already truncated LRU page" )	\
 	EM ( MF_MSG_BUDDY, "free buddy page" )				\
-	EM ( MF_MSG_BUDDY_2ND, "free buddy page (2nd try)" )		\
+	EM ( MF_MSG_DAX, "dax page" )					\
+	EM ( MF_MSG_UNSPLIT_THP, "unsplit thp" )			\
+	EM ( MF_MSG_ALREADY_POISONED, "already poisoned" )		\
 	EMe ( MF_MSG_UNKNOWN, "unknown page" )
 
 /*

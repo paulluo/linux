@@ -1,7 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/bitops.h>
 #include <linux/serial_core.h>
 #include <linux/io.h>
-#include <linux/gpio.h>
 
 #define SCI_MAJOR		204
 #define SCI_MINOR_START		8
@@ -31,8 +31,7 @@ enum {
 	SCCKS,				/* BRG Clock Select Register */
 	HSRTRGR,			/* Rx FIFO Data Count Trigger Register */
 	HSTTRGR,			/* Tx FIFO Data Count Trigger Register */
-
-	SCIx_NR_REGS,
+	SEMR,				/* Serial extended mode register */
 };
 
 
@@ -58,9 +57,15 @@ enum {
 #define SCSMR_SRC_19	0x0600	/* Sampling rate 1/19 */
 #define SCSMR_SRC_27	0x0700	/* Sampling rate 1/27 */
 
+/* Serial Control Register, SCI only bits */
+#define SCSCR_TEIE	BIT(2)  /* Transmit End Interrupt Enable */
+
 /* Serial Control Register, SCIFA/SCIFB only bits */
 #define SCSCR_TDRQE	BIT(15)	/* Tx Data Transfer Request Enable */
 #define SCSCR_RDRQE	BIT(14)	/* Rx Data Transfer Request Enable */
+
+/* Serial Control Register, HSCIF-only bits */
+#define HSSCR_TOT_SHIFT	14
 
 /* SCxSR (Serial Status Register) on SCI */
 #define SCI_TDRE	BIT(7)	/* Transmit Data Register Empty */
@@ -126,6 +131,10 @@ enum {
 
 /* HSSRR HSCIF */
 #define HSCIF_SRE	BIT(15)	/* Sampling Rate Register Enable */
+#define HSCIF_SRDE	BIT(14) /* Sampling Point Register Enable */
+
+#define HSCIF_SRHP_SHIFT	8
+#define HSCIF_SRHP_MASK		0x0f00
 
 /* SCPCR (Serial Port Control Register), SCIFA/SCIFB only */
 #define SCPCR_RTSC	BIT(4)	/* Serial Port RTS# Pin / Output Pin */

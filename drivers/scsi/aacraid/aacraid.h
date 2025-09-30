@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *	Adaptec AAC series RAID controller driver
  *	(c) Copyright 2001 Red Hat Inc.	<alan@redhat.com>
@@ -9,25 +10,10 @@
  *               2010-2015 PMC-Sierra, Inc. (aacraid@pmc-sierra.com)
  *		 2016-2017 Microsemi Corp. (aacraid@microsemi.com)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, write to
- * the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * Module Name:
  *  aacraid.h
  *
  * Abstract: Contains all routines for control of the aacraid driver
- *
  */
 
 #ifndef _AACRAID_H_
@@ -40,7 +26,10 @@
 #define nblank(x) _nblank(x)[0]
 
 #include <linux/interrupt.h>
+#include <linux/completion.h>
 #include <linux/pci.h>
+#include <scsi/scsi_host.h>
+#include <scsi/scsi_cmnd.h>
 
 /*------------------------------------------------------------------------------
  *              D E F I N E S
@@ -97,14 +86,13 @@ enum {
 #define	PMC_GLOBAL_INT_BIT0		0x00000001
 
 #ifndef AAC_DRIVER_BUILD
-# define AAC_DRIVER_BUILD 50834
+# define AAC_DRIVER_BUILD 50983
 # define AAC_DRIVER_BRANCH "-custom"
 #endif
 #define MAXIMUM_NUM_CONTAINERS	32
 
 #define AAC_NUM_MGT_FIB         8
 #define AAC_NUM_IO_FIB		(1024 - AAC_NUM_MGT_FIB)
-#define AAC_NUM_FIB		(AAC_NUM_IO_FIB + AAC_NUM_MGT_FIB)
 
 #define AAC_MAX_LUN		256
 
@@ -117,8 +105,14 @@ enum {
 /* Thor: 5 phys. buses: #0: empty, 1-4: 256 targets each */
 #define AAC_MAX_BUSES			5
 #define AAC_MAX_TARGETS		256
+#define AAC_BUS_TARGET_LOOP		(AAC_MAX_BUSES * AAC_MAX_TARGETS)
 #define AAC_MAX_NATIVE_SIZE		2048
 #define FW_ERROR_BUFFER_SIZE		512
+#define AAC_SA_TIMEOUT			180
+#define AAC_ARC_TIMEOUT			60
+
+#define get_bus_number(x)	(x/AAC_MAX_TARGETS)
+#define get_target_number(x)	(x%AAC_MAX_TARGETS)
 
 /* Thor AIF events */
 #define SA_AIF_HOTPLUG			(1<<1)
@@ -126,7 +120,7 @@ enum {
 #define SA_AIF_PDEV_CHANGE		(1<<4)
 #define SA_AIF_LDEV_CHANGE		(1<<5)
 #define SA_AIF_BPSTAT_CHANGE		(1<<30)
-#define SA_AIF_BPCFG_CHANGE		(1<<31)
+#define SA_AIF_BPCFG_CHANGE		(1U<<31)
 
 #define HBA_MAX_SG_EMBEDDED		28
 #define HBA_MAX_SG_SEPARATE		90
@@ -327,7 +321,7 @@ struct aac_ciss_phys_luns_resp {
 		u8	level3[2];
 		u8	level2[2];
 		u8	node_ident[16];	/* phys. node identifier */
-	} lun[1];			/* List of phys. devices */
+	} lun[];			/* List of phys. devices */
 };
 
 /*
@@ -512,32 +506,27 @@ struct sge_ieee1212 {
 
 struct sgmap {
 	__le32		count;
-	struct sgentry	sg[1];
+	struct sgentry	sg[];
 };
 
 struct user_sgmap {
 	u32		count;
-	struct user_sgentry	sg[1];
+	struct user_sgentry	sg[];
 };
 
 struct sgmap64 {
 	__le32		count;
-	struct sgentry64 sg[1];
+	struct sgentry64 sg[];
 };
 
 struct user_sgmap64 {
 	u32		count;
-	struct user_sgentry64 sg[1];
+	struct user_sgentry64 sg[];
 };
 
 struct sgmapraw {
 	__le32		  count;
-	struct sgentryraw sg[1];
-};
-
-struct user_sgmapraw {
-	u32		  count;
-	struct user_sgentryraw sg[1];
+	struct sgentryraw sg[];
 };
 
 struct creation_info
@@ -878,7 +867,7 @@ union aac_init
 			__le16	element_count;
 			__le16	comp_thresh;
 			__le16	unused;
-		} rrq[1];		/* up to 64 RRQ addresses */
+		} rrq[] __counted_by_le(rr_queue_count); /* up to 64 RRQ addresses */
 	} r8;
 };
 
@@ -1226,6 +1215,7 @@ struct src_registers {
 
 #define SRC_ODR_SHIFT		12
 #define SRC_IDR_SHIFT		9
+#define SRC_MSI_READ_MASK	0x1000
 
 typedef void (*fib_callback)(void *ctxt, struct fib *fibctx);
 
@@ -1235,7 +1225,7 @@ struct aac_fib_context {
 	u32			unique;		// unique value representing this context
 	ulong			jiffies;	// used for cleanup - dmb changed to ulong
 	struct list_head	next;		// used to link context's into a linked list
-	struct semaphore	wait_sem;	// this is used to wait for the next fib to arrive.
+	struct completion	completion;	// this is used to wait for the next fib to arrive.
 	int			wait;		// Set to true when thread is in WaitForSingleObject
 	unsigned long		count;		// total number of FIBs on FibList
 	struct list_head	fib_list;	// this holds fibs and their attachd hw_fibs
@@ -1307,7 +1297,7 @@ struct fib {
 	 *	This is the event the sendfib routine will wait on if the
 	 *	caller did not pass one and this is synch io.
 	 */
-	struct semaphore	event_wait;
+	struct completion	event_wait;
 	spinlock_t		event_lock;
 
 	u32			done;	/* gets set to 1 when fib is complete */
@@ -1334,17 +1324,17 @@ struct fib {
 #define AAC_DEVTYPE_RAID_MEMBER	1
 #define AAC_DEVTYPE_ARC_RAW		2
 #define AAC_DEVTYPE_NATIVE_RAW		3
-#define AAC_EXPOSE_DISK		0
-#define AAC_HIDE_DISK			3
+
+#define AAC_RESCAN_DELAY		(10 * HZ)
 
 struct aac_hba_map_info {
 	__le32	rmw_nexus;		/* nexus for native HBA devices */
 	u8		devtype;	/* device type */
-	u8		new_devtype;
-	u8		reset_state;	/* 0 - no reset, 1..x - */
+	s8		reset_state;	/* 0 - no reset, 1..x - */
 					/* after xth TM LUN reset */
 	u16		qd_limit;
-	u8		expose;		/*checks if to expose or not*/
+	u32		scan_counter;
+	struct aac_ciss_identify_pd  *safw_identify_resp;
 };
 
 /*
@@ -1523,6 +1513,7 @@ struct aac_bus_info_response {
 #define AAC_COMM_MESSAGE_TYPE3		5
 
 #define AAC_EXTOPT_SA_FIRMWARE		cpu_to_le32(1<<1)
+#define AAC_EXTOPT_SOFT_RESET		cpu_to_le32(1<<16)
 
 /* MSIX context */
 struct aac_msix_ctx {
@@ -1560,6 +1551,7 @@ struct aac_dev
 	spinlock_t		fib_lock;
 
 	struct mutex		ioctl_mutex;
+	struct mutex		scan_mutex;
 	struct aac_queue_block *queues;
 	/*
 	 *	The user API will use an IOCTL to register itself to receive
@@ -1605,6 +1597,8 @@ struct aac_dev
 	int			maximum_num_channels;
 	struct fsa_dev_info	*fsa_dev;
 	struct task_struct	*thread;
+	struct delayed_work	safw_rescan_work;
+	struct delayed_work	src_reinit_aif_worker;
 	int			cardtype;
 	/*
 	 *This lock will protect the two 32-bit
@@ -1655,6 +1649,7 @@ struct aac_dev
 	u8			raw_io_64;
 	u8			printf_enabled;
 	u8			in_reset;
+	u8			in_soft_reset;
 	u8			msi;
 	u8			sa_firmware;
 	int			management_fib_count;
@@ -1668,11 +1663,15 @@ struct aac_dev
 	u32			vector_cap;	/* MSI-X vector capab.*/
 	int			msi_enabled;	/* MSI/MSI-X enabled */
 	atomic_t		msix_counter;
+	u32			scan_counter;
 	struct msix_entry	msixentry[AAC_MAX_MSIX];
 	struct aac_msix_ctx	aac_msix[AAC_MAX_MSIX]; /* context */
 	struct aac_hba_map_info	hba_map[AAC_MAX_BUSES][AAC_MAX_TARGETS];
+	struct aac_ciss_phys_luns_resp *safw_phys_luns;
 	u8			adapter_shutdown;
 	u32			handle_pci_error;
+	bool			init_reset;
+	u8			soft_reset_support;
 };
 
 #define aac_adapter_interrupt(dev) \
@@ -1724,6 +1723,7 @@ struct aac_dev
 #define FIB_CONTEXT_FLAG_NATIVE_HBA		(0x00000010)
 #define FIB_CONTEXT_FLAG_NATIVE_HBA_TMF	(0x00000020)
 #define FIB_CONTEXT_FLAG_SCSI_CMD	(0x00000040)
+#define FIB_CONTEXT_FLAG_EH_RESET	(0x00000080)
 
 /*
  *	Define the command values
@@ -1924,7 +1924,7 @@ struct aac_raw_io2 {
 	u8		bpComplete;	/* reserved for F/W use */
 	u8		sgeFirstIndex;	/* reserved for F/W use */
 	u8		unused[4];
-	struct sge_ieee1212	sge[1];
+	struct sge_ieee1212	sge[];
 };
 
 #define CT_FLUSH_CACHE 129
@@ -2021,6 +2021,12 @@ struct aac_srb_reply
 	__le32		sense_data_size;
 	u8		sense_data[AAC_SENSE_BUFFERSIZE]; // Can this be SCSI_SENSE_BUFFERSIZE
 };
+
+struct aac_srb_unit {
+	struct aac_srb_reply	srb_reply;
+	struct aac_srb		srb;
+};
+
 /*
  * SRB Flags
  */
@@ -2487,6 +2493,7 @@ struct aac_hba_info {
 #define RCV_TEMP_READINGS		0x00000025
 #define GET_COMM_PREFERRED_SETTINGS	0x00000026
 #define IOP_RESET_FW_FIB_DUMP		0x00000034
+#define DROP_IO			0x00000035
 #define IOP_RESET			0x00001000
 #define IOP_RESET_ALWAYS		0x00001001
 #define RE_INIT_ADAPTER		0x000000ee
@@ -2522,6 +2529,7 @@ struct aac_hba_info {
 #define	FLASH_UPD_PENDING		0x00002000
 #define	FLASH_UPD_SUCCESS		0x00004000
 #define	FLASH_UPD_FAILED		0x00008000
+#define	INVALID_OMR			0xffffffff
 #define	FWUPD_TIMEOUT			(5 * 60)
 
 /*
@@ -2603,7 +2611,7 @@ struct aac_hba_info {
 struct aac_aifcmd {
 	__le32 command;		/* Tell host what type of notify this is */
 	__le32 seqnum;		/* To allow ordering of reports (if necessary) */
-	u8 data[1];		/* Undefined length (from kernel viewpoint) */
+	u8 data[];		/* Undefined length (from kernel viewpoint) */
 };
 
 /**
@@ -2617,24 +2625,73 @@ static inline unsigned int cap_to_cyls(sector_t capacity, unsigned divisor)
 	return capacity;
 }
 
+static inline int aac_pci_offline(struct aac_dev *dev)
+{
+	return pci_channel_offline(dev->pdev) || dev->handle_pci_error;
+}
+
 static inline int aac_adapter_check_health(struct aac_dev *dev)
 {
-	if (unlikely(pci_channel_offline(dev->pdev)))
+	if (unlikely(aac_pci_offline(dev)))
 		return -1;
 
 	return (dev)->a_ops.adapter_check_health(dev);
 }
 
-/* SCp.phase values */
-#define AAC_OWNER_MIDLEVEL	0x101
-#define AAC_OWNER_LOWLEVEL	0x102
-#define AAC_OWNER_ERROR_HANDLER	0x103
-#define AAC_OWNER_FIRMWARE	0x106
 
+int aac_scan_host(struct aac_dev *dev);
+
+static inline void aac_schedule_safw_scan_worker(struct aac_dev *dev)
+{
+	schedule_delayed_work(&dev->safw_rescan_work, AAC_RESCAN_DELAY);
+}
+
+static inline void aac_schedule_src_reinit_aif_worker(struct aac_dev *dev)
+{
+	schedule_delayed_work(&dev->src_reinit_aif_worker, AAC_RESCAN_DELAY);
+}
+
+static inline void aac_safw_rescan_worker(struct work_struct *work)
+{
+	struct aac_dev *dev = container_of(to_delayed_work(work),
+		struct aac_dev, safw_rescan_work);
+
+	wait_event(dev->scsi_host_ptr->host_wait,
+		!scsi_host_in_recovery(dev->scsi_host_ptr));
+
+	aac_scan_host(dev);
+}
+
+static inline void aac_cancel_rescan_worker(struct aac_dev *dev)
+{
+	cancel_delayed_work_sync(&dev->safw_rescan_work);
+	cancel_delayed_work_sync(&dev->src_reinit_aif_worker);
+}
+
+enum aac_cmd_owner {
+	AAC_OWNER_MIDLEVEL	= 0x101,
+	AAC_OWNER_LOWLEVEL	= 0x102,
+	AAC_OWNER_ERROR_HANDLER	= 0x103,
+	AAC_OWNER_FIRMWARE	= 0x106,
+};
+
+struct aac_cmd_priv {
+	int			(*callback)(struct scsi_cmnd *);
+	int			status;
+	enum aac_cmd_owner	owner;
+	bool			sent_command;
+};
+
+static inline struct aac_cmd_priv *aac_priv(struct scsi_cmnd *cmd)
+{
+	return scsi_cmd_priv(cmd);
+}
+
+void aac_safw_rescan_worker(struct work_struct *work);
+void aac_src_reinit_aif_worker(struct work_struct *work);
 int aac_acquire_irq(struct aac_dev *dev);
 void aac_free_irq(struct aac_dev *dev);
-int aac_report_phys_luns(struct aac_dev *dev, struct fib *fibptr, int rescan);
-int aac_issue_bmic_identify(struct aac_dev *dev, u32 bus, u32 target);
+int aac_setup_safw_adapter(struct aac_dev *dev);
 const char *aac_driverinfo(struct Scsi_Host *);
 void aac_fib_vector_assign(struct aac_dev *dev);
 struct fib *aac_fib_alloc(struct aac_dev *dev);
@@ -2658,12 +2715,12 @@ void aac_set_intx_mode(struct aac_dev *dev);
 int aac_get_config_status(struct aac_dev *dev, int commit_flag);
 int aac_get_containers(struct aac_dev *dev);
 int aac_scsi_cmd(struct scsi_cmnd *cmd);
-int aac_dev_ioctl(struct aac_dev *dev, int cmd, void __user *arg);
+int aac_dev_ioctl(struct aac_dev *dev, unsigned int cmd, void __user *arg);
 #ifndef shost_to_class
 #define shost_to_class(shost) &shost->shost_dev
 #endif
 ssize_t aac_get_serial_number(struct device *dev, char *buf);
-int aac_do_ioctl(struct aac_dev * dev, int cmd, void __user *arg);
+int aac_do_ioctl(struct aac_dev *dev, unsigned int cmd, void __user *arg);
 int aac_rx_init(struct aac_dev *dev);
 int aac_rkt_init(struct aac_dev *dev);
 int aac_nark_init(struct aac_dev *dev);
@@ -2678,7 +2735,6 @@ unsigned int aac_intr_normal(struct aac_dev *dev, u32 Index,
 			int isAif, int isFastResponse,
 			struct hw_fib *aif_fib);
 int aac_reset_adapter(struct aac_dev *dev, int forced, u8 reset_type);
-int aac_check_health(struct aac_dev * dev);
 int aac_command_thread(void *data);
 int aac_close_fib_context(struct aac_dev * dev, struct aac_fib_context *fibctx);
 int aac_fib_adapter_complete(struct fib * fibptr, unsigned short size);
@@ -2689,6 +2745,7 @@ int aac_probe_container(struct aac_dev *dev, int cid);
 int _aac_rx_init(struct aac_dev *dev);
 int aac_rx_select_comm(struct aac_dev *dev, int comm);
 int aac_rx_deliver_producer(struct fib * fib);
+void aac_reinit_aif(struct aac_dev *aac, unsigned int index);
 
 static inline int aac_is_src(struct aac_dev *dev)
 {
@@ -2699,6 +2756,11 @@ static inline int aac_is_src(struct aac_dev *dev)
 		device == PMC_DEVICE_S8)
 		return 1;
 	return 0;
+}
+
+static inline int aac_supports_2T(struct aac_dev *dev)
+{
+	return (dev->adapter_info.options & AAC_OPT_NEW_COMM_64);
 }
 
 char * get_container_type(unsigned type);

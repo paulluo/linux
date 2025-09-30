@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 1995-2004 Russell King
  *
@@ -6,7 +7,7 @@
 #ifndef __ASM_ARM_DELAY_H
 #define __ASM_ARM_DELAY_H
 
-#include <asm/memory.h>
+#include <asm/page.h>
 #include <asm/param.h>	/* HZ */
 
 /*

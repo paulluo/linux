@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #if !defined(_TRACE_KVM_BOOK3S_H)
 #define _TRACE_KVM_BOOK3S_H
 
@@ -13,7 +14,6 @@
 	{0x400, "INST_STORAGE"}, \
 	{0x480, "INST_SEGMENT"}, \
 	{0x500, "EXTERNAL"}, \
-	{0x501, "EXTERNAL_LEVEL"}, \
 	{0x502, "EXTERNAL_HV"}, \
 	{0x600, "ALIGNMENT"}, \
 	{0x700, "PROGRAM"}, \
@@ -25,6 +25,7 @@
 	{0xe00, "H_DATA_STORAGE"}, \
 	{0xe20, "H_INST_STORAGE"}, \
 	{0xe40, "H_EMUL_ASSIST"}, \
+	{0xea0, "H_VIRT"}, \
 	{0xf00, "PERFMON"}, \
 	{0xf20, "ALTIVEC"}, \
 	{0xf40, "VSX"}

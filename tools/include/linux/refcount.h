@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _TOOLS_LINUX_REFCOUNT_H
 #define _TOOLS_LINUX_REFCOUNT_H
 
@@ -55,6 +56,11 @@ typedef struct refcount_struct {
 #define REFCOUNT_INIT(n)	{ .refs = ATOMIC_INIT(n), }
 
 static inline void refcount_set(refcount_t *r, unsigned int n)
+{
+	atomic_set(&r->refs, n);
+}
+
+static inline void refcount_set_release(refcount_t *r, unsigned int n)
 {
 	atomic_set(&r->refs, n);
 }

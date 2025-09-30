@@ -1,12 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  KVM guest address space mapping code
  *
- *    Copyright IBM Corp. 2007, 2016
+ *    Copyright IBM Corp. 2007, 2020
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
+ *		 David Hildenbrand <david@redhat.com>
+ *		 Janosch Frank <frankja@linux.vnet.ibm.com>
  */
 
+#include <linux/cpufeature.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/pagewalk.h>
 #include <linux/swap.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
@@ -14,22 +19,44 @@
 #include <linux/swapops.h>
 #include <linux/ksm.h>
 #include <linux/mman.h>
-
-#include <asm/pgtable.h>
+#include <linux/pgtable.h>
+#include <asm/page-states.h>
 #include <asm/pgalloc.h>
+#include <asm/machine.h>
+#include <asm/gmap_helpers.h>
 #include <asm/gmap.h>
-#include <asm/tlb.h>
+#include <asm/page.h>
+
+/*
+ * The address is saved in a radix tree directly; NULL would be ambiguous,
+ * since 0 is a valid address, and NULL is returned when nothing was found.
+ * The lower bits are ignored by all users of the macro, so it can be used
+ * to distinguish a valid address 0 from a NULL.
+ */
+#define VALID_GADDR_FLAG 1
+#define IS_GADDR_VALID(gaddr) ((gaddr) & VALID_GADDR_FLAG)
+#define MAKE_VALID_GADDR(gaddr) (((gaddr) & HPAGE_MASK) | VALID_GADDR_FLAG)
 
 #define GMAP_SHADOW_FAKE_TABLE 1ULL
 
+static struct page *gmap_alloc_crst(void)
+{
+	struct page *page;
+
+	page = alloc_pages(GFP_KERNEL_ACCOUNT, CRST_ALLOC_ORDER);
+	if (!page)
+		return NULL;
+	__arch_set_page_dat(page_to_virt(page), 1UL << CRST_ALLOC_ORDER);
+	return page;
+}
+
 /**
  * gmap_alloc - allocate and initialize a guest address space
- * @mm: pointer to the parent mm_struct
  * @limit: maximum address of the gmap address space
  *
  * Returns a guest address space structure.
  */
-static struct gmap *gmap_alloc(unsigned long limit)
+struct gmap *gmap_alloc(unsigned long limit)
 {
 	struct gmap *gmap;
 	struct page *page;
@@ -53,24 +80,20 @@ static struct gmap *gmap_alloc(unsigned long limit)
 		atype = _ASCE_TYPE_REGION1;
 		etype = _REGION1_ENTRY_EMPTY;
 	}
-	gmap = kzalloc(sizeof(struct gmap), GFP_KERNEL);
+	gmap = kzalloc(sizeof(struct gmap), GFP_KERNEL_ACCOUNT);
 	if (!gmap)
 		goto out;
-	INIT_LIST_HEAD(&gmap->crst_list);
 	INIT_LIST_HEAD(&gmap->children);
-	INIT_LIST_HEAD(&gmap->pt_list);
-	INIT_RADIX_TREE(&gmap->guest_to_host, GFP_KERNEL);
-	INIT_RADIX_TREE(&gmap->host_to_guest, GFP_ATOMIC);
-	INIT_RADIX_TREE(&gmap->host_to_rmap, GFP_ATOMIC);
+	INIT_RADIX_TREE(&gmap->guest_to_host, GFP_KERNEL_ACCOUNT);
+	INIT_RADIX_TREE(&gmap->host_to_guest, GFP_ATOMIC | __GFP_ACCOUNT);
+	INIT_RADIX_TREE(&gmap->host_to_rmap, GFP_ATOMIC | __GFP_ACCOUNT);
 	spin_lock_init(&gmap->guest_table_lock);
 	spin_lock_init(&gmap->shadow_lock);
-	atomic_set(&gmap->ref_count, 1);
-	page = alloc_pages(GFP_KERNEL, CRST_ALLOC_ORDER);
+	refcount_set(&gmap->ref_count, 1);
+	page = gmap_alloc_crst();
 	if (!page)
 		goto out_free;
-	page->index = 0;
-	list_add(&page->lru, &gmap->crst_list);
-	table = (unsigned long *) page_to_phys(page);
+	table = page_to_virt(page);
 	crst_table_init(table, etype);
 	gmap->table = table;
 	gmap->asce = atype | _ASCE_TABLE_LENGTH |
@@ -83,6 +106,7 @@ out_free:
 out:
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(gmap_alloc);
 
 /**
  * gmap_create - create a guest address space
@@ -114,7 +138,7 @@ EXPORT_SYMBOL_GPL(gmap_create);
 
 static void gmap_flush_tlb(struct gmap *gmap)
 {
-	if (MACHINE_HAS_IDTE)
+	if (cpu_has_idte())
 		__tlb_flush_idte(gmap->asce);
 	else
 		__tlb_flush_global();
@@ -171,30 +195,46 @@ static void gmap_rmap_radix_tree_free(struct radix_tree_root *root)
 	} while (nr > 0);
 }
 
+static void gmap_free_crst(unsigned long *table, bool free_ptes)
+{
+	bool is_segment = (table[0] & _SEGMENT_ENTRY_TYPE_MASK) == 0;
+	int i;
+
+	if (is_segment) {
+		if (!free_ptes)
+			goto out;
+		for (i = 0; i < _CRST_ENTRIES; i++)
+			if (!(table[i] & _SEGMENT_ENTRY_INVALID))
+				page_table_free_pgste(page_ptdesc(phys_to_page(table[i])));
+	} else {
+		for (i = 0; i < _CRST_ENTRIES; i++)
+			if (!(table[i] & _REGION_ENTRY_INVALID))
+				gmap_free_crst(__va(table[i] & PAGE_MASK), free_ptes);
+	}
+
+out:
+	free_pages((unsigned long)table, CRST_ALLOC_ORDER);
+}
+
 /**
  * gmap_free - free a guest address space
  * @gmap: pointer to the guest address space structure
  *
  * No locks required. There are no references to this gmap anymore.
  */
-static void gmap_free(struct gmap *gmap)
+void gmap_free(struct gmap *gmap)
 {
-	struct page *page, *next;
-
 	/* Flush tlb of all gmaps (if not already done for shadows) */
 	if (!(gmap_is_shadow(gmap) && gmap->removed))
 		gmap_flush_tlb(gmap);
 	/* Free all segment & region tables. */
-	list_for_each_entry_safe(page, next, &gmap->crst_list, lru)
-		__free_pages(page, CRST_ALLOC_ORDER);
+	gmap_free_crst(gmap->table, gmap_is_shadow(gmap));
+
 	gmap_radix_tree_free(&gmap->guest_to_host);
 	gmap_radix_tree_free(&gmap->host_to_guest);
 
 	/* Free additional data for a shadow gmap */
 	if (gmap_is_shadow(gmap)) {
-		/* Free all page tables. */
-		list_for_each_entry_safe(page, next, &gmap->pt_list, lru)
-			page_table_free_pgste(page);
 		gmap_rmap_radix_tree_free(&gmap->host_to_rmap);
 		/* Release reference to the parent */
 		gmap_put(gmap->parent);
@@ -202,6 +242,7 @@ static void gmap_free(struct gmap *gmap)
 
 	kfree(gmap);
 }
+EXPORT_SYMBOL_GPL(gmap_free);
 
 /**
  * gmap_get - increase reference counter for guest address space
@@ -211,7 +252,7 @@ static void gmap_free(struct gmap *gmap)
  */
 struct gmap *gmap_get(struct gmap *gmap)
 {
-	atomic_inc(&gmap->ref_count);
+	refcount_inc(&gmap->ref_count);
 	return gmap;
 }
 EXPORT_SYMBOL_GPL(gmap_get);
@@ -224,7 +265,7 @@ EXPORT_SYMBOL_GPL(gmap_get);
  */
 void gmap_put(struct gmap *gmap)
 {
-	if (atomic_dec_return(&gmap->ref_count) == 0)
+	if (refcount_dec_and_test(&gmap->ref_count))
 		gmap_free(gmap);
 }
 EXPORT_SYMBOL_GPL(gmap_put);
@@ -265,39 +306,8 @@ void gmap_remove(struct gmap *gmap)
 }
 EXPORT_SYMBOL_GPL(gmap_remove);
 
-/**
- * gmap_enable - switch primary space to the guest address space
- * @gmap: pointer to the guest address space structure
- */
-void gmap_enable(struct gmap *gmap)
-{
-	S390_lowcore.gmap = (unsigned long) gmap;
-}
-EXPORT_SYMBOL_GPL(gmap_enable);
-
-/**
- * gmap_disable - switch back to the standard primary address space
- * @gmap: pointer to the guest address space structure
- */
-void gmap_disable(struct gmap *gmap)
-{
-	S390_lowcore.gmap = 0UL;
-}
-EXPORT_SYMBOL_GPL(gmap_disable);
-
-/**
- * gmap_get_enabled - get a pointer to the currently enabled gmap
- *
- * Returns a pointer to the currently enabled gmap. 0 if none is enabled.
- */
-struct gmap *gmap_get_enabled(void)
-{
-	return (struct gmap *) S390_lowcore.gmap;
-}
-EXPORT_SYMBOL_GPL(gmap_get_enabled);
-
 /*
- * gmap_alloc_table is assumed to be called with mmap_sem held
+ * gmap_alloc_table is assumed to be called with mmap_lock held
  */
 static int gmap_alloc_table(struct gmap *gmap, unsigned long *table,
 			    unsigned long init, unsigned long gaddr)
@@ -306,17 +316,15 @@ static int gmap_alloc_table(struct gmap *gmap, unsigned long *table,
 	unsigned long *new;
 
 	/* since we dont free the gmap table until gmap_free we can unlock */
-	page = alloc_pages(GFP_KERNEL, CRST_ALLOC_ORDER);
+	page = gmap_alloc_crst();
 	if (!page)
 		return -ENOMEM;
-	new = (unsigned long *) page_to_phys(page);
+	new = page_to_virt(page);
 	crst_table_init(new, init);
 	spin_lock(&gmap->guest_table_lock);
 	if (*table & _REGION_ENTRY_INVALID) {
-		list_add(&page->lru, &gmap->crst_list);
-		*table = (unsigned long) new | _REGION_ENTRY_LENGTH |
+		*table = __pa(new) | _REGION_ENTRY_LENGTH |
 			(*table & _REGION_ENTRY_TYPE_MASK);
-		page->index = gaddr;
 		page = NULL;
 	}
 	spin_unlock(&gmap->guest_table_lock);
@@ -325,22 +333,23 @@ static int gmap_alloc_table(struct gmap *gmap, unsigned long *table,
 	return 0;
 }
 
-/**
- * __gmap_segment_gaddr - find virtual address from segment pointer
- * @entry: pointer to a segment table entry in the guest address space
- *
- * Returns the virtual address in the guest address space for the segment
- */
-static unsigned long __gmap_segment_gaddr(unsigned long *entry)
+static unsigned long host_to_guest_lookup(struct gmap *gmap, unsigned long vmaddr)
 {
-	struct page *page;
-	unsigned long offset, mask;
+	return (unsigned long)radix_tree_lookup(&gmap->host_to_guest, vmaddr >> PMD_SHIFT);
+}
 
-	offset = (unsigned long) entry / sizeof(unsigned long);
-	offset = (offset & (PTRS_PER_PMD - 1)) * PMD_SIZE;
-	mask = ~(PTRS_PER_PMD * sizeof(pmd_t) - 1);
-	page = virt_to_page((void *)((unsigned long) entry & mask));
-	return page->index + offset;
+static unsigned long host_to_guest_delete(struct gmap *gmap, unsigned long vmaddr)
+{
+	return (unsigned long)radix_tree_delete(&gmap->host_to_guest, vmaddr >> PMD_SHIFT);
+}
+
+static pmd_t *host_to_guest_pmd_delete(struct gmap *gmap, unsigned long vmaddr,
+				       unsigned long *gaddr)
+{
+	*gaddr = host_to_guest_delete(gmap, vmaddr);
+	if (IS_GADDR_VALID(*gaddr))
+		return (pmd_t *)gmap_table_walk(gmap, *gaddr, 1);
+	return NULL;
 }
 
 /**
@@ -352,16 +361,19 @@ static unsigned long __gmap_segment_gaddr(unsigned long *entry)
  */
 static int __gmap_unlink_by_vmaddr(struct gmap *gmap, unsigned long vmaddr)
 {
-	unsigned long *entry;
+	unsigned long gaddr;
 	int flush = 0;
+	pmd_t *pmdp;
 
 	BUG_ON(gmap_is_shadow(gmap));
 	spin_lock(&gmap->guest_table_lock);
-	entry = radix_tree_delete(&gmap->host_to_guest, vmaddr >> PMD_SHIFT);
-	if (entry) {
-		flush = (*entry != _SEGMENT_ENTRY_EMPTY);
-		*entry = _SEGMENT_ENTRY_EMPTY;
+
+	pmdp = host_to_guest_pmd_delete(gmap, vmaddr, &gaddr);
+	if (pmdp) {
+		flush = (pmd_val(*pmdp) != _SEGMENT_ENTRY_EMPTY);
+		*pmdp = __pmd(_SEGMENT_ENTRY_EMPTY);
 	}
+
 	spin_unlock(&gmap->guest_table_lock);
 	return flush;
 }
@@ -402,10 +414,10 @@ int gmap_unmap_segment(struct gmap *gmap, unsigned long to, unsigned long len)
 		return -EINVAL;
 
 	flush = 0;
-	down_write(&gmap->mm->mmap_sem);
+	mmap_write_lock(gmap->mm);
 	for (off = 0; off < len; off += PMD_SIZE)
 		flush |= __gmap_unmap_by_gaddr(gmap, to + off);
-	up_write(&gmap->mm->mmap_sem);
+	mmap_write_unlock(gmap->mm);
 	if (flush)
 		gmap_flush_tlb(gmap);
 	return 0;
@@ -435,7 +447,7 @@ int gmap_map_segment(struct gmap *gmap, unsigned long from,
 		return -EINVAL;
 
 	flush = 0;
-	down_write(&gmap->mm->mmap_sem);
+	mmap_write_lock(gmap->mm);
 	for (off = 0; off < len; off += PMD_SIZE) {
 		/* Remove old translation */
 		flush |= __gmap_unmap_by_gaddr(gmap, to + off);
@@ -445,7 +457,7 @@ int gmap_map_segment(struct gmap *gmap, unsigned long from,
 				      (void *) from + off))
 			break;
 	}
-	up_write(&gmap->mm->mmap_sem);
+	mmap_write_unlock(gmap->mm);
 	if (flush)
 		gmap_flush_tlb(gmap);
 	if (off >= len)
@@ -463,7 +475,7 @@ EXPORT_SYMBOL_GPL(gmap_map_segment);
  * Returns user space address which corresponds to the guest address or
  * -EFAULT if no such mapping exists.
  * This function does not establish potentially missing page table entries.
- * The mmap_sem of the mm that belongs to the address space must be held
+ * The mmap_lock of the mm that belongs to the address space must be held
  * when this function gets called.
  *
  * Note: Can also be called for shadow gmaps.
@@ -480,28 +492,8 @@ unsigned long __gmap_translate(struct gmap *gmap, unsigned long gaddr)
 EXPORT_SYMBOL_GPL(__gmap_translate);
 
 /**
- * gmap_translate - translate a guest address to a user space address
- * @gmap: pointer to guest mapping meta data structure
- * @gaddr: guest address
- *
- * Returns user space address which corresponds to the guest address or
- * -EFAULT if no such mapping exists.
- * This function does not establish potentially missing page table entries.
- */
-unsigned long gmap_translate(struct gmap *gmap, unsigned long gaddr)
-{
-	unsigned long rc;
-
-	down_read(&gmap->mm->mmap_sem);
-	rc = __gmap_translate(gmap, gaddr);
-	up_read(&gmap->mm->mmap_sem);
-	return rc;
-}
-EXPORT_SYMBOL_GPL(gmap_translate);
-
-/**
  * gmap_unlink - disconnect a page table from the gmap shadow tables
- * @gmap: pointer to guest mapping meta data structure
+ * @mm: pointer to the parent mm_struct
  * @table: pointer to the host page table
  * @vmaddr: vm address associated with the host page table
  */
@@ -520,15 +512,18 @@ void gmap_unlink(struct mm_struct *mm, unsigned long *table,
 	rcu_read_unlock();
 }
 
+static void gmap_pmdp_xchg(struct gmap *gmap, pmd_t *old, pmd_t new,
+			   unsigned long gaddr);
+
 /**
- * gmap_link - set up shadow page tables to connect a host to a guest address
+ * __gmap_link - set up shadow page tables to connect a host to a guest address
  * @gmap: pointer to guest mapping meta data structure
  * @gaddr: guest address
  * @vmaddr: vm address
  *
  * Returns 0 on success, -ENOMEM for out of memory conditions, and -EFAULT
  * if the vm address is already mapped to a different guest segment.
- * The mmap_sem of the mm that belongs to the address space must be held
+ * The mmap_lock of the mm that belongs to the address space must be held
  * when this function gets called.
  */
 int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
@@ -540,6 +535,7 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
 	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
+	u64 unprot;
 	int rc;
 
 	BUG_ON(gmap_is_shadow(gmap));
@@ -551,7 +547,7 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
 		    gmap_alloc_table(gmap, table, _REGION2_ENTRY_EMPTY,
 				     gaddr & _REGION1_MASK))
 			return -ENOMEM;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
 	}
 	if ((gmap->asce & _ASCE_TYPE_MASK) >= _ASCE_TYPE_REGION2) {
 		table += (gaddr & _REGION2_INDEX) >> _REGION2_SHIFT;
@@ -559,7 +555,7 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
 		    gmap_alloc_table(gmap, table, _REGION3_ENTRY_EMPTY,
 				     gaddr & _REGION2_MASK))
 			return -ENOMEM;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
 	}
 	if ((gmap->asce & _ASCE_TYPE_MASK) >= _ASCE_TYPE_REGION3) {
 		table += (gaddr & _REGION3_INDEX) >> _REGION3_SHIFT;
@@ -567,7 +563,7 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
 		    gmap_alloc_table(gmap, table, _SEGMENT_ENTRY_EMPTY,
 				     gaddr & _REGION3_MASK))
 			return -ENOMEM;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
 	}
 	table += (gaddr & _SEGMENT_INDEX) >> _SEGMENT_SHIFT;
 	/* Walk the parent mm page table */
@@ -579,122 +575,65 @@ int __gmap_link(struct gmap *gmap, unsigned long gaddr, unsigned long vmaddr)
 	pud = pud_offset(p4d, vmaddr);
 	VM_BUG_ON(pud_none(*pud));
 	/* large puds cannot yet be handled */
-	if (pud_large(*pud))
+	if (pud_leaf(*pud))
 		return -EFAULT;
 	pmd = pmd_offset(pud, vmaddr);
 	VM_BUG_ON(pmd_none(*pmd));
-	/* large pmds cannot yet be handled */
-	if (pmd_large(*pmd))
+	/* Are we allowed to use huge pages? */
+	if (pmd_leaf(*pmd) && !gmap->mm->context.allow_gmap_hpage_1m)
 		return -EFAULT;
 	/* Link gmap segment table entry location to page table. */
-	rc = radix_tree_preload(GFP_KERNEL);
+	rc = radix_tree_preload(GFP_KERNEL_ACCOUNT);
 	if (rc)
 		return rc;
 	ptl = pmd_lock(mm, pmd);
 	spin_lock(&gmap->guest_table_lock);
 	if (*table == _SEGMENT_ENTRY_EMPTY) {
 		rc = radix_tree_insert(&gmap->host_to_guest,
-				       vmaddr >> PMD_SHIFT, table);
-		if (!rc)
-			*table = pmd_val(*pmd);
-	} else
-		rc = 0;
+				       vmaddr >> PMD_SHIFT,
+				       (void *)MAKE_VALID_GADDR(gaddr));
+		if (!rc) {
+			if (pmd_leaf(*pmd)) {
+				*table = (pmd_val(*pmd) &
+					  _SEGMENT_ENTRY_HARDWARE_BITS_LARGE)
+					| _SEGMENT_ENTRY_GMAP_UC
+					| _SEGMENT_ENTRY;
+			} else
+				*table = pmd_val(*pmd) &
+					_SEGMENT_ENTRY_HARDWARE_BITS;
+		}
+	} else if (*table & _SEGMENT_ENTRY_PROTECT &&
+		   !(pmd_val(*pmd) & _SEGMENT_ENTRY_PROTECT)) {
+		unprot = (u64)*table;
+		unprot &= ~_SEGMENT_ENTRY_PROTECT;
+		unprot |= _SEGMENT_ENTRY_GMAP_UC;
+		gmap_pmdp_xchg(gmap, (pmd_t *)table, __pmd(unprot), gaddr);
+	}
 	spin_unlock(&gmap->guest_table_lock);
 	spin_unlock(ptl);
 	radix_tree_preload_end();
 	return rc;
 }
-
-/**
- * gmap_fault - resolve a fault on a guest address
- * @gmap: pointer to guest mapping meta data structure
- * @gaddr: guest address
- * @fault_flags: flags to pass down to handle_mm_fault()
- *
- * Returns 0 on success, -ENOMEM for out of memory conditions, and -EFAULT
- * if the vm address is already mapped to a different guest segment.
- */
-int gmap_fault(struct gmap *gmap, unsigned long gaddr,
-	       unsigned int fault_flags)
-{
-	unsigned long vmaddr;
-	int rc;
-	bool unlocked;
-
-	down_read(&gmap->mm->mmap_sem);
-
-retry:
-	unlocked = false;
-	vmaddr = __gmap_translate(gmap, gaddr);
-	if (IS_ERR_VALUE(vmaddr)) {
-		rc = vmaddr;
-		goto out_up;
-	}
-	if (fixup_user_fault(current, gmap->mm, vmaddr, fault_flags,
-			     &unlocked)) {
-		rc = -EFAULT;
-		goto out_up;
-	}
-	/*
-	 * In the case that fixup_user_fault unlocked the mmap_sem during
-	 * faultin redo __gmap_translate to not race with a map/unmap_segment.
-	 */
-	if (unlocked)
-		goto retry;
-
-	rc = __gmap_link(gmap, gaddr, vmaddr);
-out_up:
-	up_read(&gmap->mm->mmap_sem);
-	return rc;
-}
-EXPORT_SYMBOL_GPL(gmap_fault);
+EXPORT_SYMBOL(__gmap_link);
 
 /*
- * this function is assumed to be called with mmap_sem held
+ * this function is assumed to be called with mmap_lock held
  */
 void __gmap_zap(struct gmap *gmap, unsigned long gaddr)
 {
 	unsigned long vmaddr;
-	spinlock_t *ptl;
-	pte_t *ptep;
+
+	mmap_assert_locked(gmap->mm);
 
 	/* Find the vm address for the guest address */
 	vmaddr = (unsigned long) radix_tree_lookup(&gmap->guest_to_host,
 						   gaddr >> PMD_SHIFT);
 	if (vmaddr) {
 		vmaddr |= gaddr & ~PMD_MASK;
-		/* Get pointer to the page table entry */
-		ptep = get_locked_pte(gmap->mm, vmaddr, &ptl);
-		if (likely(ptep))
-			ptep_zap_unused(gmap->mm, vmaddr, ptep, 0);
-		pte_unmap_unlock(ptep, ptl);
+		gmap_helper_zap_one_page(gmap->mm, vmaddr);
 	}
 }
 EXPORT_SYMBOL_GPL(__gmap_zap);
-
-void gmap_discard(struct gmap *gmap, unsigned long from, unsigned long to)
-{
-	unsigned long gaddr, vmaddr, size;
-	struct vm_area_struct *vma;
-
-	down_read(&gmap->mm->mmap_sem);
-	for (gaddr = from; gaddr < to;
-	     gaddr = (gaddr + PMD_SIZE) & PMD_MASK) {
-		/* Find the vm address for the guest address */
-		vmaddr = (unsigned long)
-			radix_tree_lookup(&gmap->guest_to_host,
-					  gaddr >> PMD_SHIFT);
-		if (!vmaddr)
-			continue;
-		vmaddr |= gaddr & ~PMD_MASK;
-		/* Find vma in the parent mm */
-		vma = find_vma(gmap->mm, vmaddr);
-		size = min(to - gaddr, PMD_SIZE - (gaddr & ~PMD_MASK));
-		zap_page_range(vma, vmaddr, size);
-	}
-	up_read(&gmap->mm->mmap_sem);
-}
-EXPORT_SYMBOL_GPL(gmap_discard);
 
 static LIST_HEAD(gmap_notifier_list);
 static DEFINE_SPINLOCK(gmap_notifier_lock);
@@ -757,54 +696,58 @@ static void gmap_call_notifier(struct gmap *gmap, unsigned long start,
  *
  * Note: Can also be called for shadow gmaps.
  */
-static inline unsigned long *gmap_table_walk(struct gmap *gmap,
-					     unsigned long gaddr, int level)
+unsigned long *gmap_table_walk(struct gmap *gmap, unsigned long gaddr, int level)
 {
-	unsigned long *table;
+	const int asce_type = gmap->asce & _ASCE_TYPE_MASK;
+	unsigned long *table = gmap->table;
 
-	if ((gmap->asce & _ASCE_TYPE_MASK) + 4 < (level * 4))
-		return NULL;
 	if (gmap_is_shadow(gmap) && gmap->removed)
 		return NULL;
-	if (gaddr & (-1UL << (31 + ((gmap->asce & _ASCE_TYPE_MASK) >> 2)*11)))
+
+	if (WARN_ON_ONCE(level > (asce_type >> 2) + 1))
 		return NULL;
-	table = gmap->table;
-	switch (gmap->asce & _ASCE_TYPE_MASK) {
+
+	if (asce_type != _ASCE_TYPE_REGION1 &&
+	    gaddr & (-1UL << (31 + (asce_type >> 2) * 11)))
+		return NULL;
+
+	switch (asce_type) {
 	case _ASCE_TYPE_REGION1:
 		table += (gaddr & _REGION1_INDEX) >> _REGION1_SHIFT;
 		if (level == 4)
 			break;
 		if (*table & _REGION_ENTRY_INVALID)
 			return NULL;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
-		/* Fallthrough */
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
+		fallthrough;
 	case _ASCE_TYPE_REGION2:
 		table += (gaddr & _REGION2_INDEX) >> _REGION2_SHIFT;
 		if (level == 3)
 			break;
 		if (*table & _REGION_ENTRY_INVALID)
 			return NULL;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
-		/* Fallthrough */
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
+		fallthrough;
 	case _ASCE_TYPE_REGION3:
 		table += (gaddr & _REGION3_INDEX) >> _REGION3_SHIFT;
 		if (level == 2)
 			break;
 		if (*table & _REGION_ENTRY_INVALID)
 			return NULL;
-		table = (unsigned long *)(*table & _REGION_ENTRY_ORIGIN);
-		/* Fallthrough */
+		table = __va(*table & _REGION_ENTRY_ORIGIN);
+		fallthrough;
 	case _ASCE_TYPE_SEGMENT:
 		table += (gaddr & _SEGMENT_INDEX) >> _SEGMENT_SHIFT;
 		if (level == 1)
 			break;
 		if (*table & _REGION_ENTRY_INVALID)
 			return NULL;
-		table = (unsigned long *)(*table & _SEGMENT_ENTRY_ORIGIN);
-		table += (gaddr & _PAGE_INDEX) >> _PAGE_SHIFT;
+		table = __va(*table & _SEGMENT_ENTRY_ORIGIN);
+		table += (gaddr & _PAGE_INDEX) >> PAGE_SHIFT;
 	}
 	return table;
 }
+EXPORT_SYMBOL(gmap_table_walk);
 
 /**
  * gmap_pte_op_walk - walk the gmap page table, get the page table lock
@@ -814,27 +757,17 @@ static inline unsigned long *gmap_table_walk(struct gmap *gmap,
  * @ptl: pointer to the spinlock pointer
  *
  * Returns a pointer to the locked pte for a guest address, or NULL
- *
- * Note: Can also be called for shadow gmaps.
  */
 static pte_t *gmap_pte_op_walk(struct gmap *gmap, unsigned long gaddr,
 			       spinlock_t **ptl)
 {
 	unsigned long *table;
 
-	if (gmap_is_shadow(gmap))
-		spin_lock(&gmap->guest_table_lock);
+	BUG_ON(gmap_is_shadow(gmap));
 	/* Walk the gmap page table, lock and get pte pointer */
 	table = gmap_table_walk(gmap, gaddr, 1); /* get segment pointer */
-	if (!table || *table & _SEGMENT_ENTRY_INVALID) {
-		if (gmap_is_shadow(gmap))
-			spin_unlock(&gmap->guest_table_lock);
+	if (!table || *table & _SEGMENT_ENTRY_INVALID)
 		return NULL;
-	}
-	if (gmap_is_shadow(gmap)) {
-		*ptl = &gmap->guest_table_lock;
-		return pte_offset_map((pmd_t *) table, gaddr);
-	}
 	return pte_alloc_map_lock(gmap->mm, (pmd_t *) table, gaddr, ptl);
 }
 
@@ -858,10 +791,10 @@ static int gmap_pte_op_fixup(struct gmap *gmap, unsigned long gaddr,
 
 	BUG_ON(gmap_is_shadow(gmap));
 	fault_flags = (prot == PROT_WRITE) ? FAULT_FLAG_WRITE : 0;
-	if (fixup_user_fault(current, mm, vmaddr, fault_flags, &unlocked))
+	if (fixup_user_fault(mm, vmaddr, fault_flags, &unlocked))
 		return -EFAULT;
 	if (unlocked)
-		/* lost mmap_sem, caller has to retry __gmap_translate */
+		/* lost mmap_lock, caller has to retry __gmap_translate */
 		return 0;
 	/* Connect the page tables */
 	return __gmap_link(gmap, gaddr, vmaddr);
@@ -869,11 +802,138 @@ static int gmap_pte_op_fixup(struct gmap *gmap, unsigned long gaddr,
 
 /**
  * gmap_pte_op_end - release the page table lock
- * @ptl: pointer to the spinlock pointer
+ * @ptep: pointer to the locked pte
+ * @ptl: pointer to the page table spinlock
  */
-static void gmap_pte_op_end(spinlock_t *ptl)
+static void gmap_pte_op_end(pte_t *ptep, spinlock_t *ptl)
 {
-	spin_unlock(ptl);
+	pte_unmap_unlock(ptep, ptl);
+}
+
+/**
+ * gmap_pmd_op_walk - walk the gmap tables, get the guest table lock
+ *		      and return the pmd pointer
+ * @gmap: pointer to guest mapping meta data structure
+ * @gaddr: virtual address in the guest address space
+ *
+ * Returns a pointer to the pmd for a guest address, or NULL
+ */
+static inline pmd_t *gmap_pmd_op_walk(struct gmap *gmap, unsigned long gaddr)
+{
+	pmd_t *pmdp;
+
+	BUG_ON(gmap_is_shadow(gmap));
+	pmdp = (pmd_t *) gmap_table_walk(gmap, gaddr, 1);
+	if (!pmdp)
+		return NULL;
+
+	/* without huge pages, there is no need to take the table lock */
+	if (!gmap->mm->context.allow_gmap_hpage_1m)
+		return pmd_none(*pmdp) ? NULL : pmdp;
+
+	spin_lock(&gmap->guest_table_lock);
+	if (pmd_none(*pmdp)) {
+		spin_unlock(&gmap->guest_table_lock);
+		return NULL;
+	}
+
+	/* 4k page table entries are locked via the pte (pte_alloc_map_lock). */
+	if (!pmd_leaf(*pmdp))
+		spin_unlock(&gmap->guest_table_lock);
+	return pmdp;
+}
+
+/**
+ * gmap_pmd_op_end - release the guest_table_lock if needed
+ * @gmap: pointer to the guest mapping meta data structure
+ * @pmdp: pointer to the pmd
+ */
+static inline void gmap_pmd_op_end(struct gmap *gmap, pmd_t *pmdp)
+{
+	if (pmd_leaf(*pmdp))
+		spin_unlock(&gmap->guest_table_lock);
+}
+
+/*
+ * gmap_protect_pmd - remove access rights to memory and set pmd notification bits
+ * @pmdp: pointer to the pmd to be protected
+ * @prot: indicates access rights: PROT_NONE, PROT_READ or PROT_WRITE
+ * @bits: notification bits to set
+ *
+ * Returns:
+ * 0 if successfully protected
+ * -EAGAIN if a fixup is needed
+ * -EINVAL if unsupported notifier bits have been specified
+ *
+ * Expected to be called with sg->mm->mmap_lock in read and
+ * guest_table_lock held.
+ */
+static int gmap_protect_pmd(struct gmap *gmap, unsigned long gaddr,
+			    pmd_t *pmdp, int prot, unsigned long bits)
+{
+	int pmd_i = pmd_val(*pmdp) & _SEGMENT_ENTRY_INVALID;
+	int pmd_p = pmd_val(*pmdp) & _SEGMENT_ENTRY_PROTECT;
+	pmd_t new = *pmdp;
+
+	/* Fixup needed */
+	if ((pmd_i && (prot != PROT_NONE)) || (pmd_p && (prot == PROT_WRITE)))
+		return -EAGAIN;
+
+	if (prot == PROT_NONE && !pmd_i) {
+		new = set_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_INVALID));
+		gmap_pmdp_xchg(gmap, pmdp, new, gaddr);
+	}
+
+	if (prot == PROT_READ && !pmd_p) {
+		new = clear_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_INVALID));
+		new = set_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_PROTECT));
+		gmap_pmdp_xchg(gmap, pmdp, new, gaddr);
+	}
+
+	if (bits & GMAP_NOTIFY_MPROT)
+		set_pmd(pmdp, set_pmd_bit(*pmdp, __pgprot(_SEGMENT_ENTRY_GMAP_IN)));
+
+	/* Shadow GMAP protection needs split PMDs */
+	if (bits & GMAP_NOTIFY_SHADOW)
+		return -EINVAL;
+
+	return 0;
+}
+
+/*
+ * gmap_protect_pte - remove access rights to memory and set pgste bits
+ * @gmap: pointer to guest mapping meta data structure
+ * @gaddr: virtual address in the guest address space
+ * @pmdp: pointer to the pmd associated with the pte
+ * @prot: indicates access rights: PROT_NONE, PROT_READ or PROT_WRITE
+ * @bits: notification bits to set
+ *
+ * Returns 0 if successfully protected, -ENOMEM if out of memory and
+ * -EAGAIN if a fixup is needed.
+ *
+ * Expected to be called with sg->mm->mmap_lock in read
+ */
+static int gmap_protect_pte(struct gmap *gmap, unsigned long gaddr,
+			    pmd_t *pmdp, int prot, unsigned long bits)
+{
+	int rc;
+	pte_t *ptep;
+	spinlock_t *ptl;
+	unsigned long pbits = 0;
+
+	if (pmd_val(*pmdp) & _SEGMENT_ENTRY_INVALID)
+		return -EAGAIN;
+
+	ptep = pte_alloc_map_lock(gmap->mm, pmdp, gaddr, &ptl);
+	if (!ptep)
+		return -ENOMEM;
+
+	pbits |= (bits & GMAP_NOTIFY_MPROT) ? PGSTE_IN_BIT : 0;
+	pbits |= (bits & GMAP_NOTIFY_SHADOW) ? PGSTE_VSIE_BIT : 0;
+	/* Protect and unlock. */
+	rc = ptep_force_prot(gmap->mm, gaddr, ptep, prot, pbits);
+	gmap_pte_op_end(ptep, ptl);
+	return rc;
 }
 
 /*
@@ -884,72 +944,40 @@ static void gmap_pte_op_end(spinlock_t *ptl)
  * @prot: indicates access rights: PROT_NONE, PROT_READ or PROT_WRITE
  * @bits: pgste notification bits to set
  *
- * Returns 0 if successfully protected, -ENOMEM if out of memory and
- * -EFAULT if gaddr is invalid (or mapping for shadows is missing).
+ * Returns:
+ *   PAGE_SIZE if a small page was successfully protected;
+ *   HPAGE_SIZE if a large page was successfully protected;
+ *   -ENOMEM if out of memory;
+ *   -EFAULT if gaddr is invalid (or mapping for shadows is missing);
+ *   -EAGAIN if the guest mapping is missing and should be fixed by the caller.
  *
- * Called with sg->mm->mmap_sem in read.
- *
- * Note: Can also be called for shadow gmaps.
+ * Context: Called with sg->mm->mmap_lock in read.
  */
-static int gmap_protect_range(struct gmap *gmap, unsigned long gaddr,
-			      unsigned long len, int prot, unsigned long bits)
+int gmap_protect_one(struct gmap *gmap, unsigned long gaddr, int prot, unsigned long bits)
 {
-	unsigned long vmaddr;
-	spinlock_t *ptl;
-	pte_t *ptep;
-	int rc;
+	pmd_t *pmdp;
+	int rc = 0;
 
-	while (len) {
-		rc = -EAGAIN;
-		ptep = gmap_pte_op_walk(gmap, gaddr, &ptl);
-		if (ptep) {
-			rc = ptep_force_prot(gmap->mm, gaddr, ptep, prot, bits);
-			gmap_pte_op_end(ptl);
-		}
-		if (rc) {
-			vmaddr = __gmap_translate(gmap, gaddr);
-			if (IS_ERR_VALUE(vmaddr))
-				return vmaddr;
-			rc = gmap_pte_op_fixup(gmap, gaddr, vmaddr, prot);
-			if (rc)
-				return rc;
-			continue;
-		}
-		gaddr += PAGE_SIZE;
-		len -= PAGE_SIZE;
+	BUG_ON(gmap_is_shadow(gmap));
+
+	pmdp = gmap_pmd_op_walk(gmap, gaddr);
+	if (!pmdp)
+		return -EAGAIN;
+
+	if (!pmd_leaf(*pmdp)) {
+		rc = gmap_protect_pte(gmap, gaddr, pmdp, prot, bits);
+		if (!rc)
+			rc = PAGE_SIZE;
+	} else {
+		rc = gmap_protect_pmd(gmap, gaddr, pmdp, prot, bits);
+		if (!rc)
+			rc = HPAGE_SIZE;
 	}
-	return 0;
-}
+	gmap_pmd_op_end(gmap, pmdp);
 
-/**
- * gmap_mprotect_notify - change access rights for a range of ptes and
- *                        call the notifier if any pte changes again
- * @gmap: pointer to guest mapping meta data structure
- * @gaddr: virtual address in the guest address space
- * @len: size of area
- * @prot: indicates access rights: PROT_NONE, PROT_READ or PROT_WRITE
- *
- * Returns 0 if for each page in the given range a gmap mapping exists,
- * the new access rights could be set and the notifier could be armed.
- * If the gmap mapping is missing for one or more pages -EFAULT is
- * returned. If no memory could be allocated -ENOMEM is returned.
- * This function establishes missing page table entries.
- */
-int gmap_mprotect_notify(struct gmap *gmap, unsigned long gaddr,
-			 unsigned long len, int prot)
-{
-	int rc;
-
-	if ((gaddr & ~PAGE_MASK) || (len & ~PAGE_MASK) || gmap_is_shadow(gmap))
-		return -EINVAL;
-	if (!MACHINE_HAS_ESOP && prot == PROT_READ)
-		return -EINVAL;
-	down_read(&gmap->mm->mmap_sem);
-	rc = gmap_protect_range(gmap, gaddr, len, prot, PGSTE_IN_BIT);
-	up_read(&gmap->mm->mmap_sem);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(gmap_mprotect_notify);
+EXPORT_SYMBOL_GPL(gmap_protect_one);
 
 /**
  * gmap_read_table - get an unsigned long value from a guest page table using
@@ -959,9 +987,10 @@ EXPORT_SYMBOL_GPL(gmap_mprotect_notify);
  * @val: pointer to the unsigned long value to return
  *
  * Returns 0 if the value was read, -ENOMEM if out of memory and -EFAULT
- * if reading using the virtual address failed.
+ * if reading using the virtual address failed. -EINVAL if called on a gmap
+ * shadow.
  *
- * Called with gmap->mm->mmap_sem in read.
+ * Called with gmap->mm->mmap_lock in read.
  */
 int gmap_read_table(struct gmap *gmap, unsigned long gaddr, unsigned long *val)
 {
@@ -969,6 +998,9 @@ int gmap_read_table(struct gmap *gmap, unsigned long gaddr, unsigned long *val)
 	spinlock_t *ptl;
 	pte_t *ptep, pte;
 	int rc;
+
+	if (gmap_is_shadow(gmap))
+		return -EINVAL;
 
 	while (1) {
 		rc = -EAGAIN;
@@ -978,12 +1010,12 @@ int gmap_read_table(struct gmap *gmap, unsigned long gaddr, unsigned long *val)
 			if (pte_present(pte) && (pte_val(pte) & _PAGE_READ)) {
 				address = pte_val(pte) & PAGE_MASK;
 				address += gaddr & ~PAGE_MASK;
-				*val = *(unsigned long *) address;
-				pte_val(*ptep) |= _PAGE_YOUNG;
+				*val = *(unsigned long *)__va(address);
+				set_pte(ptep, set_pte_bit(*ptep, __pgprot(_PAGE_YOUNG)));
 				/* Do *NOT* clear the _PAGE_INVALID bit! */
 				rc = 0;
 			}
-			gmap_pte_op_end(ptl);
+			gmap_pte_op_end(ptep, ptl);
 		}
 		if (!rc)
 			break;
@@ -1011,6 +1043,7 @@ EXPORT_SYMBOL_GPL(gmap_read_table);
 static inline void gmap_insert_rmap(struct gmap *sg, unsigned long vmaddr,
 				    struct gmap_rmap *rmap)
 {
+	struct gmap_rmap *temp;
 	void __rcu **slot;
 
 	BUG_ON(!gmap_is_shadow(sg));
@@ -1018,6 +1051,12 @@ static inline void gmap_insert_rmap(struct gmap *sg, unsigned long vmaddr,
 	if (slot) {
 		rmap->next = radix_tree_deref_slot_protected(slot,
 							&sg->guest_table_lock);
+		for (temp = rmap->next; temp; temp = temp->next) {
+			if (temp->raddr == rmap->raddr) {
+				kfree(rmap);
+				return;
+			}
+		}
 		radix_tree_replace_slot(&sg->host_to_rmap, slot, rmap);
 	} else {
 		rmap->next = NULL;
@@ -1027,18 +1066,17 @@ static inline void gmap_insert_rmap(struct gmap *sg, unsigned long vmaddr,
 }
 
 /**
- * gmap_protect_rmap - modify access rights to memory and create an rmap
+ * gmap_protect_rmap - restrict access rights to memory (RO) and create an rmap
  * @sg: pointer to the shadow guest address space structure
  * @raddr: rmap address in the shadow gmap
  * @paddr: address in the parent guest address space
  * @len: length of the memory area to protect
- * @prot: indicates access rights: none, read-only or read-write
  *
  * Returns 0 if successfully protected and the rmap was created, -ENOMEM
  * if out of memory and -EFAULT if paddr is invalid.
  */
 static int gmap_protect_rmap(struct gmap *sg, unsigned long raddr,
-			     unsigned long paddr, unsigned long len, int prot)
+			     unsigned long paddr, unsigned long len)
 {
 	struct gmap *parent;
 	struct gmap_rmap *rmap;
@@ -1053,11 +1091,11 @@ static int gmap_protect_rmap(struct gmap *sg, unsigned long raddr,
 		vmaddr = __gmap_translate(parent, paddr);
 		if (IS_ERR_VALUE(vmaddr))
 			return vmaddr;
-		rmap = kzalloc(sizeof(*rmap), GFP_KERNEL);
+		rmap = kzalloc(sizeof(*rmap), GFP_KERNEL_ACCOUNT);
 		if (!rmap)
 			return -ENOMEM;
 		rmap->raddr = raddr;
-		rc = radix_tree_preload(GFP_KERNEL);
+		rc = radix_tree_preload(GFP_KERNEL_ACCOUNT);
 		if (rc) {
 			kfree(rmap);
 			return rc;
@@ -1066,17 +1104,17 @@ static int gmap_protect_rmap(struct gmap *sg, unsigned long raddr,
 		ptep = gmap_pte_op_walk(parent, paddr, &ptl);
 		if (ptep) {
 			spin_lock(&sg->guest_table_lock);
-			rc = ptep_force_prot(parent->mm, paddr, ptep, prot,
+			rc = ptep_force_prot(parent->mm, paddr, ptep, PROT_READ,
 					     PGSTE_VSIE_BIT);
 			if (!rc)
 				gmap_insert_rmap(sg, vmaddr, rmap);
 			spin_unlock(&sg->guest_table_lock);
-			gmap_pte_op_end(ptl);
+			gmap_pte_op_end(ptep, ptl);
 		}
 		radix_tree_preload_end();
 		if (rc) {
 			kfree(rmap);
-			rc = gmap_pte_op_fixup(parent, paddr, vmaddr, prot);
+			rc = gmap_pte_op_fixup(parent, paddr, vmaddr, PROT_READ);
 			if (rc)
 				return rc;
 			continue;
@@ -1107,7 +1145,7 @@ static int gmap_protect_rmap(struct gmap *sg, unsigned long raddr,
 static inline void gmap_idte_one(unsigned long asce, unsigned long vaddr)
 {
 	asm volatile(
-		"	.insn	rrf,0xb98e0000,%0,%1,0,0"
+		"	idte	%0,0,%1"
 		: : "a" (asce), "a" (vaddr) : "cc", "memory");
 }
 
@@ -1126,7 +1164,7 @@ static void gmap_unshadow_page(struct gmap *sg, unsigned long raddr)
 	table = gmap_table_walk(sg, raddr, 0); /* get page table pointer */
 	if (!table || *table & _PAGE_INVALID)
 		return;
-	gmap_call_notifier(sg, raddr, raddr + _PAGE_SIZE - 1);
+	gmap_call_notifier(sg, raddr, raddr + PAGE_SIZE - 1);
 	ptep_unshadow_pte(sg->mm, raddr, (pte_t *) table);
 }
 
@@ -1144,7 +1182,7 @@ static void __gmap_unshadow_pgt(struct gmap *sg, unsigned long raddr,
 	int i;
 
 	BUG_ON(!gmap_is_shadow(sg));
-	for (i = 0; i < _PAGE_ENTRIES; i++, raddr += _PAGE_SIZE)
+	for (i = 0; i < _PAGE_ENTRIES; i++, raddr += PAGE_SIZE)
 		pgt[i] = _PAGE_INVALID;
 }
 
@@ -1157,23 +1195,23 @@ static void __gmap_unshadow_pgt(struct gmap *sg, unsigned long raddr,
  */
 static void gmap_unshadow_pgt(struct gmap *sg, unsigned long raddr)
 {
-	unsigned long sto, *ste, *pgt;
-	struct page *page;
+	unsigned long *ste;
+	phys_addr_t sto, pgt;
+	struct ptdesc *ptdesc;
 
 	BUG_ON(!gmap_is_shadow(sg));
 	ste = gmap_table_walk(sg, raddr, 1); /* get segment pointer */
 	if (!ste || !(*ste & _SEGMENT_ENTRY_ORIGIN))
 		return;
 	gmap_call_notifier(sg, raddr, raddr + _SEGMENT_SIZE - 1);
-	sto = (unsigned long) (ste - ((raddr & _SEGMENT_INDEX) >> _SEGMENT_SHIFT));
+	sto = __pa(ste - ((raddr & _SEGMENT_INDEX) >> _SEGMENT_SHIFT));
 	gmap_idte_one(sto | _ASCE_TYPE_SEGMENT, raddr);
-	pgt = (unsigned long *)(*ste & _SEGMENT_ENTRY_ORIGIN);
+	pgt = *ste & _SEGMENT_ENTRY_ORIGIN;
 	*ste = _SEGMENT_ENTRY_EMPTY;
-	__gmap_unshadow_pgt(sg, raddr, pgt);
+	__gmap_unshadow_pgt(sg, raddr, __va(pgt));
 	/* Free page table */
-	page = pfn_to_page(__pa(pgt) >> PAGE_SHIFT);
-	list_del(&page->lru);
-	page_table_free_pgste(page);
+	ptdesc = page_ptdesc(phys_to_page(pgt));
+	page_table_free_pgste(ptdesc);
 }
 
 /**
@@ -1187,22 +1225,20 @@ static void gmap_unshadow_pgt(struct gmap *sg, unsigned long raddr)
 static void __gmap_unshadow_sgt(struct gmap *sg, unsigned long raddr,
 				unsigned long *sgt)
 {
-	unsigned long asce, *pgt;
-	struct page *page;
+	struct ptdesc *ptdesc;
+	phys_addr_t pgt;
 	int i;
 
 	BUG_ON(!gmap_is_shadow(sg));
-	asce = (unsigned long) sgt | _ASCE_TYPE_SEGMENT;
 	for (i = 0; i < _CRST_ENTRIES; i++, raddr += _SEGMENT_SIZE) {
 		if (!(sgt[i] & _SEGMENT_ENTRY_ORIGIN))
 			continue;
-		pgt = (unsigned long *)(sgt[i] & _REGION_ENTRY_ORIGIN);
+		pgt = sgt[i] & _REGION_ENTRY_ORIGIN;
 		sgt[i] = _SEGMENT_ENTRY_EMPTY;
-		__gmap_unshadow_pgt(sg, raddr, pgt);
+		__gmap_unshadow_pgt(sg, raddr, __va(pgt));
 		/* Free page table */
-		page = pfn_to_page(__pa(pgt) >> PAGE_SHIFT);
-		list_del(&page->lru);
-		page_table_free_pgste(page);
+		ptdesc = page_ptdesc(phys_to_page(pgt));
+		page_table_free_pgste(ptdesc);
 	}
 }
 
@@ -1215,7 +1251,8 @@ static void __gmap_unshadow_sgt(struct gmap *sg, unsigned long raddr,
  */
 static void gmap_unshadow_sgt(struct gmap *sg, unsigned long raddr)
 {
-	unsigned long r3o, *r3e, *sgt;
+	unsigned long r3o, *r3e;
+	phys_addr_t sgt;
 	struct page *page;
 
 	BUG_ON(!gmap_is_shadow(sg));
@@ -1224,13 +1261,12 @@ static void gmap_unshadow_sgt(struct gmap *sg, unsigned long raddr)
 		return;
 	gmap_call_notifier(sg, raddr, raddr + _REGION3_SIZE - 1);
 	r3o = (unsigned long) (r3e - ((raddr & _REGION3_INDEX) >> _REGION3_SHIFT));
-	gmap_idte_one(r3o | _ASCE_TYPE_REGION3, raddr);
-	sgt = (unsigned long *)(*r3e & _REGION_ENTRY_ORIGIN);
+	gmap_idte_one(__pa(r3o) | _ASCE_TYPE_REGION3, raddr);
+	sgt = *r3e & _REGION_ENTRY_ORIGIN;
 	*r3e = _REGION3_ENTRY_EMPTY;
-	__gmap_unshadow_sgt(sg, raddr, sgt);
+	__gmap_unshadow_sgt(sg, raddr, __va(sgt));
 	/* Free segment table */
-	page = pfn_to_page(__pa(sgt) >> PAGE_SHIFT);
-	list_del(&page->lru);
+	page = phys_to_page(sgt);
 	__free_pages(page, CRST_ALLOC_ORDER);
 }
 
@@ -1245,21 +1281,19 @@ static void gmap_unshadow_sgt(struct gmap *sg, unsigned long raddr)
 static void __gmap_unshadow_r3t(struct gmap *sg, unsigned long raddr,
 				unsigned long *r3t)
 {
-	unsigned long asce, *sgt;
 	struct page *page;
+	phys_addr_t sgt;
 	int i;
 
 	BUG_ON(!gmap_is_shadow(sg));
-	asce = (unsigned long) r3t | _ASCE_TYPE_REGION3;
 	for (i = 0; i < _CRST_ENTRIES; i++, raddr += _REGION3_SIZE) {
 		if (!(r3t[i] & _REGION_ENTRY_ORIGIN))
 			continue;
-		sgt = (unsigned long *)(r3t[i] & _REGION_ENTRY_ORIGIN);
+		sgt = r3t[i] & _REGION_ENTRY_ORIGIN;
 		r3t[i] = _REGION3_ENTRY_EMPTY;
-		__gmap_unshadow_sgt(sg, raddr, sgt);
+		__gmap_unshadow_sgt(sg, raddr, __va(sgt));
 		/* Free segment table */
-		page = pfn_to_page(__pa(sgt) >> PAGE_SHIFT);
-		list_del(&page->lru);
+		page = phys_to_page(sgt);
 		__free_pages(page, CRST_ALLOC_ORDER);
 	}
 }
@@ -1273,7 +1307,8 @@ static void __gmap_unshadow_r3t(struct gmap *sg, unsigned long raddr,
  */
 static void gmap_unshadow_r3t(struct gmap *sg, unsigned long raddr)
 {
-	unsigned long r2o, *r2e, *r3t;
+	unsigned long r2o, *r2e;
+	phys_addr_t r3t;
 	struct page *page;
 
 	BUG_ON(!gmap_is_shadow(sg));
@@ -1282,13 +1317,12 @@ static void gmap_unshadow_r3t(struct gmap *sg, unsigned long raddr)
 		return;
 	gmap_call_notifier(sg, raddr, raddr + _REGION2_SIZE - 1);
 	r2o = (unsigned long) (r2e - ((raddr & _REGION2_INDEX) >> _REGION2_SHIFT));
-	gmap_idte_one(r2o | _ASCE_TYPE_REGION2, raddr);
-	r3t = (unsigned long *)(*r2e & _REGION_ENTRY_ORIGIN);
+	gmap_idte_one(__pa(r2o) | _ASCE_TYPE_REGION2, raddr);
+	r3t = *r2e & _REGION_ENTRY_ORIGIN;
 	*r2e = _REGION2_ENTRY_EMPTY;
-	__gmap_unshadow_r3t(sg, raddr, r3t);
+	__gmap_unshadow_r3t(sg, raddr, __va(r3t));
 	/* Free region 3 table */
-	page = pfn_to_page(__pa(r3t) >> PAGE_SHIFT);
-	list_del(&page->lru);
+	page = phys_to_page(r3t);
 	__free_pages(page, CRST_ALLOC_ORDER);
 }
 
@@ -1303,21 +1337,19 @@ static void gmap_unshadow_r3t(struct gmap *sg, unsigned long raddr)
 static void __gmap_unshadow_r2t(struct gmap *sg, unsigned long raddr,
 				unsigned long *r2t)
 {
-	unsigned long asce, *r3t;
+	phys_addr_t r3t;
 	struct page *page;
 	int i;
 
 	BUG_ON(!gmap_is_shadow(sg));
-	asce = (unsigned long) r2t | _ASCE_TYPE_REGION2;
 	for (i = 0; i < _CRST_ENTRIES; i++, raddr += _REGION2_SIZE) {
 		if (!(r2t[i] & _REGION_ENTRY_ORIGIN))
 			continue;
-		r3t = (unsigned long *)(r2t[i] & _REGION_ENTRY_ORIGIN);
+		r3t = r2t[i] & _REGION_ENTRY_ORIGIN;
 		r2t[i] = _REGION2_ENTRY_EMPTY;
-		__gmap_unshadow_r3t(sg, raddr, r3t);
+		__gmap_unshadow_r3t(sg, raddr, __va(r3t));
 		/* Free region 3 table */
-		page = pfn_to_page(__pa(r3t) >> PAGE_SHIFT);
-		list_del(&page->lru);
+		page = phys_to_page(r3t);
 		__free_pages(page, CRST_ALLOC_ORDER);
 	}
 }
@@ -1331,8 +1363,9 @@ static void __gmap_unshadow_r2t(struct gmap *sg, unsigned long raddr,
  */
 static void gmap_unshadow_r2t(struct gmap *sg, unsigned long raddr)
 {
-	unsigned long r1o, *r1e, *r2t;
+	unsigned long r1o, *r1e;
 	struct page *page;
+	phys_addr_t r2t;
 
 	BUG_ON(!gmap_is_shadow(sg));
 	r1e = gmap_table_walk(sg, raddr, 4); /* get region-1 pointer */
@@ -1340,13 +1373,12 @@ static void gmap_unshadow_r2t(struct gmap *sg, unsigned long raddr)
 		return;
 	gmap_call_notifier(sg, raddr, raddr + _REGION1_SIZE - 1);
 	r1o = (unsigned long) (r1e - ((raddr & _REGION1_INDEX) >> _REGION1_SHIFT));
-	gmap_idte_one(r1o | _ASCE_TYPE_REGION1, raddr);
-	r2t = (unsigned long *)(*r1e & _REGION_ENTRY_ORIGIN);
+	gmap_idte_one(__pa(r1o) | _ASCE_TYPE_REGION1, raddr);
+	r2t = *r1e & _REGION_ENTRY_ORIGIN;
 	*r1e = _REGION1_ENTRY_EMPTY;
-	__gmap_unshadow_r2t(sg, raddr, r2t);
+	__gmap_unshadow_r2t(sg, raddr, __va(r2t));
 	/* Free region 2 table */
-	page = pfn_to_page(__pa(r2t) >> PAGE_SHIFT);
-	list_del(&page->lru);
+	page = phys_to_page(r2t);
 	__free_pages(page, CRST_ALLOC_ORDER);
 }
 
@@ -1361,23 +1393,23 @@ static void gmap_unshadow_r2t(struct gmap *sg, unsigned long raddr)
 static void __gmap_unshadow_r1t(struct gmap *sg, unsigned long raddr,
 				unsigned long *r1t)
 {
-	unsigned long asce, *r2t;
+	unsigned long asce;
 	struct page *page;
+	phys_addr_t r2t;
 	int i;
 
 	BUG_ON(!gmap_is_shadow(sg));
-	asce = (unsigned long) r1t | _ASCE_TYPE_REGION1;
+	asce = __pa(r1t) | _ASCE_TYPE_REGION1;
 	for (i = 0; i < _CRST_ENTRIES; i++, raddr += _REGION1_SIZE) {
 		if (!(r1t[i] & _REGION_ENTRY_ORIGIN))
 			continue;
-		r2t = (unsigned long *)(r1t[i] & _REGION_ENTRY_ORIGIN);
-		__gmap_unshadow_r2t(sg, raddr, r2t);
+		r2t = r1t[i] & _REGION_ENTRY_ORIGIN;
+		__gmap_unshadow_r2t(sg, raddr, __va(r2t));
 		/* Clear entry and flush translation r1t -> r2t */
 		gmap_idte_one(asce, raddr);
 		r1t[i] = _REGION1_ENTRY_EMPTY;
 		/* Free region 2 table */
-		page = pfn_to_page(__pa(r2t) >> PAGE_SHIFT);
-		list_del(&page->lru);
+		page = phys_to_page(r2t);
 		__free_pages(page, CRST_ALLOC_ORDER);
 	}
 }
@@ -1388,7 +1420,7 @@ static void __gmap_unshadow_r1t(struct gmap *sg, unsigned long raddr,
  *
  * Called with sg->guest_table_lock
  */
-static void gmap_unshadow(struct gmap *sg)
+void gmap_unshadow(struct gmap *sg)
 {
 	unsigned long *table;
 
@@ -1398,7 +1430,7 @@ static void gmap_unshadow(struct gmap *sg)
 	sg->removed = 1;
 	gmap_call_notifier(sg, 0, -1UL);
 	gmap_flush_tlb(sg);
-	table = (unsigned long *)(sg->asce & _ASCE_ORIGIN);
+	table = __va(sg->asce & _ASCE_ORIGIN);
 	switch (sg->asce & _ASCE_TYPE_MASK) {
 	case _ASCE_TYPE_REGION1:
 		__gmap_unshadow_r1t(sg, 0, table);
@@ -1414,141 +1446,7 @@ static void gmap_unshadow(struct gmap *sg)
 		break;
 	}
 }
-
-/**
- * gmap_find_shadow - find a specific asce in the list of shadow tables
- * @parent: pointer to the parent gmap
- * @asce: ASCE for which the shadow table is created
- * @edat_level: edat level to be used for the shadow translation
- *
- * Returns the pointer to a gmap if a shadow table with the given asce is
- * already available, ERR_PTR(-EAGAIN) if another one is just being created,
- * otherwise NULL
- */
-static struct gmap *gmap_find_shadow(struct gmap *parent, unsigned long asce,
-				     int edat_level)
-{
-	struct gmap *sg;
-
-	list_for_each_entry(sg, &parent->children, list) {
-		if (sg->orig_asce != asce || sg->edat_level != edat_level ||
-		    sg->removed)
-			continue;
-		if (!sg->initialized)
-			return ERR_PTR(-EAGAIN);
-		atomic_inc(&sg->ref_count);
-		return sg;
-	}
-	return NULL;
-}
-
-/**
- * gmap_shadow_valid - check if a shadow guest address space matches the
- *                     given properties and is still valid
- * @sg: pointer to the shadow guest address space structure
- * @asce: ASCE for which the shadow table is requested
- * @edat_level: edat level to be used for the shadow translation
- *
- * Returns 1 if the gmap shadow is still valid and matches the given
- * properties, the caller can continue using it. Returns 0 otherwise, the
- * caller has to request a new shadow gmap in this case.
- *
- */
-int gmap_shadow_valid(struct gmap *sg, unsigned long asce, int edat_level)
-{
-	if (sg->removed)
-		return 0;
-	return sg->orig_asce == asce && sg->edat_level == edat_level;
-}
-EXPORT_SYMBOL_GPL(gmap_shadow_valid);
-
-/**
- * gmap_shadow - create/find a shadow guest address space
- * @parent: pointer to the parent gmap
- * @asce: ASCE for which the shadow table is created
- * @edat_level: edat level to be used for the shadow translation
- *
- * The pages of the top level page table referred by the asce parameter
- * will be set to read-only and marked in the PGSTEs of the kvm process.
- * The shadow table will be removed automatically on any change to the
- * PTE mapping for the source table.
- *
- * Returns a guest address space structure, ERR_PTR(-ENOMEM) if out of memory,
- * ERR_PTR(-EAGAIN) if the caller has to retry and ERR_PTR(-EFAULT) if the
- * parent gmap table could not be protected.
- */
-struct gmap *gmap_shadow(struct gmap *parent, unsigned long asce,
-			 int edat_level)
-{
-	struct gmap *sg, *new;
-	unsigned long limit;
-	int rc;
-
-	BUG_ON(gmap_is_shadow(parent));
-	spin_lock(&parent->shadow_lock);
-	sg = gmap_find_shadow(parent, asce, edat_level);
-	spin_unlock(&parent->shadow_lock);
-	if (sg)
-		return sg;
-	/* Create a new shadow gmap */
-	limit = -1UL >> (33 - (((asce & _ASCE_TYPE_MASK) >> 2) * 11));
-	if (asce & _ASCE_REAL_SPACE)
-		limit = -1UL;
-	new = gmap_alloc(limit);
-	if (!new)
-		return ERR_PTR(-ENOMEM);
-	new->mm = parent->mm;
-	new->parent = gmap_get(parent);
-	new->orig_asce = asce;
-	new->edat_level = edat_level;
-	new->initialized = false;
-	spin_lock(&parent->shadow_lock);
-	/* Recheck if another CPU created the same shadow */
-	sg = gmap_find_shadow(parent, asce, edat_level);
-	if (sg) {
-		spin_unlock(&parent->shadow_lock);
-		gmap_free(new);
-		return sg;
-	}
-	if (asce & _ASCE_REAL_SPACE) {
-		/* only allow one real-space gmap shadow */
-		list_for_each_entry(sg, &parent->children, list) {
-			if (sg->orig_asce & _ASCE_REAL_SPACE) {
-				spin_lock(&sg->guest_table_lock);
-				gmap_unshadow(sg);
-				spin_unlock(&sg->guest_table_lock);
-				list_del(&sg->list);
-				gmap_put(sg);
-				break;
-			}
-		}
-	}
-	atomic_set(&new->ref_count, 2);
-	list_add(&new->list, &parent->children);
-	if (asce & _ASCE_REAL_SPACE) {
-		/* nothing to protect, return right away */
-		new->initialized = true;
-		spin_unlock(&parent->shadow_lock);
-		return new;
-	}
-	spin_unlock(&parent->shadow_lock);
-	/* protect after insertion, so it will get properly invalidated */
-	down_read(&parent->mm->mmap_sem);
-	rc = gmap_protect_range(parent, asce & _ASCE_ORIGIN,
-				((asce & _ASCE_TABLE_LENGTH) + 1) * PAGE_SIZE,
-				PROT_READ, PGSTE_VSIE_BIT);
-	up_read(&parent->mm->mmap_sem);
-	spin_lock(&parent->shadow_lock);
-	new->initialized = true;
-	if (rc) {
-		list_del(&new->list);
-		gmap_free(new);
-		new = ERR_PTR(rc);
-	}
-	spin_unlock(&parent->shadow_lock);
-	return new;
-}
-EXPORT_SYMBOL_GPL(gmap_shadow);
+EXPORT_SYMBOL(gmap_unshadow);
 
 /**
  * gmap_shadow_r2t - create an empty shadow region 2 table
@@ -1560,31 +1458,29 @@ EXPORT_SYMBOL_GPL(gmap_shadow);
  * The r2t parameter specifies the address of the source table. The
  * four pages of the source table are made read-only in the parent gmap
  * address space. A write to the source table area @r2t will automatically
- * remove the shadow r2 table and all of its decendents.
+ * remove the shadow r2 table and all of its descendants.
  *
  * Returns 0 if successfully shadowed or already shadowed, -EAGAIN if the
  * shadow table structure is incomplete, -ENOMEM if out of memory and
  * -EFAULT if an address in the parent gmap could not be resolved.
  *
- * Called with sg->mm->mmap_sem in read.
+ * Called with sg->mm->mmap_lock in read.
  */
 int gmap_shadow_r2t(struct gmap *sg, unsigned long saddr, unsigned long r2t,
 		    int fake)
 {
 	unsigned long raddr, origin, offset, len;
-	unsigned long *s_r2t, *table;
+	unsigned long *table;
+	phys_addr_t s_r2t;
 	struct page *page;
 	int rc;
 
 	BUG_ON(!gmap_is_shadow(sg));
 	/* Allocate a shadow region second table */
-	page = alloc_pages(GFP_KERNEL, CRST_ALLOC_ORDER);
+	page = gmap_alloc_crst();
 	if (!page)
 		return -ENOMEM;
-	page->index = r2t & _REGION_ENTRY_ORIGIN;
-	if (fake)
-		page->index |= GMAP_SHADOW_FAKE_TABLE;
-	s_r2t = (unsigned long *) page_to_phys(page);
+	s_r2t = page_to_phys(page);
 	/* Install shadow region second table */
 	spin_lock(&sg->guest_table_lock);
 	table = gmap_table_walk(sg, saddr, 4); /* get region-1 pointer */
@@ -1599,13 +1495,12 @@ int gmap_shadow_r2t(struct gmap *sg, unsigned long saddr, unsigned long r2t,
 		rc = -EAGAIN;		/* Race with shadow */
 		goto out_free;
 	}
-	crst_table_init(s_r2t, _REGION2_ENTRY_EMPTY);
+	crst_table_init(__va(s_r2t), _REGION2_ENTRY_EMPTY);
 	/* mark as invalid as long as the parent table is not protected */
-	*table = (unsigned long) s_r2t | _REGION_ENTRY_LENGTH |
+	*table = s_r2t | _REGION_ENTRY_LENGTH |
 		 _REGION_ENTRY_TYPE_R1 | _REGION_ENTRY_INVALID;
 	if (sg->edat_level >= 1)
 		*table |= (r2t & _REGION_ENTRY_PROTECT);
-	list_add(&page->lru, &sg->crst_list);
 	if (fake) {
 		/* nothing to protect for fake tables */
 		*table &= ~_REGION_ENTRY_INVALID;
@@ -1618,12 +1513,11 @@ int gmap_shadow_r2t(struct gmap *sg, unsigned long saddr, unsigned long r2t,
 	origin = r2t & _REGION_ENTRY_ORIGIN;
 	offset = ((r2t & _REGION_ENTRY_OFFSET) >> 6) * PAGE_SIZE;
 	len = ((r2t & _REGION_ENTRY_LENGTH) + 1) * PAGE_SIZE - offset;
-	rc = gmap_protect_rmap(sg, raddr, origin + offset, len, PROT_READ);
+	rc = gmap_protect_rmap(sg, raddr, origin + offset, len);
 	spin_lock(&sg->guest_table_lock);
 	if (!rc) {
 		table = gmap_table_walk(sg, saddr, 4);
-		if (!table || (*table & _REGION_ENTRY_ORIGIN) !=
-			      (unsigned long) s_r2t)
+		if (!table || (*table & _REGION_ENTRY_ORIGIN) != s_r2t)
 			rc = -EAGAIN;		/* Race with unshadow */
 		else
 			*table &= ~_REGION_ENTRY_INVALID;
@@ -1650,25 +1544,23 @@ EXPORT_SYMBOL_GPL(gmap_shadow_r2t);
  * shadow table structure is incomplete, -ENOMEM if out of memory and
  * -EFAULT if an address in the parent gmap could not be resolved.
  *
- * Called with sg->mm->mmap_sem in read.
+ * Called with sg->mm->mmap_lock in read.
  */
 int gmap_shadow_r3t(struct gmap *sg, unsigned long saddr, unsigned long r3t,
 		    int fake)
 {
 	unsigned long raddr, origin, offset, len;
-	unsigned long *s_r3t, *table;
+	unsigned long *table;
+	phys_addr_t s_r3t;
 	struct page *page;
 	int rc;
 
 	BUG_ON(!gmap_is_shadow(sg));
 	/* Allocate a shadow region second table */
-	page = alloc_pages(GFP_KERNEL, CRST_ALLOC_ORDER);
+	page = gmap_alloc_crst();
 	if (!page)
 		return -ENOMEM;
-	page->index = r3t & _REGION_ENTRY_ORIGIN;
-	if (fake)
-		page->index |= GMAP_SHADOW_FAKE_TABLE;
-	s_r3t = (unsigned long *) page_to_phys(page);
+	s_r3t = page_to_phys(page);
 	/* Install shadow region second table */
 	spin_lock(&sg->guest_table_lock);
 	table = gmap_table_walk(sg, saddr, 3); /* get region-2 pointer */
@@ -1681,14 +1573,14 @@ int gmap_shadow_r3t(struct gmap *sg, unsigned long saddr, unsigned long r3t,
 		goto out_free;
 	} else if (*table & _REGION_ENTRY_ORIGIN) {
 		rc = -EAGAIN;		/* Race with shadow */
+		goto out_free;
 	}
-	crst_table_init(s_r3t, _REGION3_ENTRY_EMPTY);
+	crst_table_init(__va(s_r3t), _REGION3_ENTRY_EMPTY);
 	/* mark as invalid as long as the parent table is not protected */
-	*table = (unsigned long) s_r3t | _REGION_ENTRY_LENGTH |
+	*table = s_r3t | _REGION_ENTRY_LENGTH |
 		 _REGION_ENTRY_TYPE_R2 | _REGION_ENTRY_INVALID;
 	if (sg->edat_level >= 1)
 		*table |= (r3t & _REGION_ENTRY_PROTECT);
-	list_add(&page->lru, &sg->crst_list);
 	if (fake) {
 		/* nothing to protect for fake tables */
 		*table &= ~_REGION_ENTRY_INVALID;
@@ -1701,12 +1593,11 @@ int gmap_shadow_r3t(struct gmap *sg, unsigned long saddr, unsigned long r3t,
 	origin = r3t & _REGION_ENTRY_ORIGIN;
 	offset = ((r3t & _REGION_ENTRY_OFFSET) >> 6) * PAGE_SIZE;
 	len = ((r3t & _REGION_ENTRY_LENGTH) + 1) * PAGE_SIZE - offset;
-	rc = gmap_protect_rmap(sg, raddr, origin + offset, len, PROT_READ);
+	rc = gmap_protect_rmap(sg, raddr, origin + offset, len);
 	spin_lock(&sg->guest_table_lock);
 	if (!rc) {
 		table = gmap_table_walk(sg, saddr, 3);
-		if (!table || (*table & _REGION_ENTRY_ORIGIN) !=
-			      (unsigned long) s_r3t)
+		if (!table || (*table & _REGION_ENTRY_ORIGIN) != s_r3t)
 			rc = -EAGAIN;		/* Race with unshadow */
 		else
 			*table &= ~_REGION_ENTRY_INVALID;
@@ -1733,25 +1624,23 @@ EXPORT_SYMBOL_GPL(gmap_shadow_r3t);
  * shadow table structure is incomplete, -ENOMEM if out of memory and
  * -EFAULT if an address in the parent gmap could not be resolved.
  *
- * Called with sg->mm->mmap_sem in read.
+ * Called with sg->mm->mmap_lock in read.
  */
 int gmap_shadow_sgt(struct gmap *sg, unsigned long saddr, unsigned long sgt,
 		    int fake)
 {
 	unsigned long raddr, origin, offset, len;
-	unsigned long *s_sgt, *table;
+	unsigned long *table;
+	phys_addr_t s_sgt;
 	struct page *page;
 	int rc;
 
 	BUG_ON(!gmap_is_shadow(sg) || (sgt & _REGION3_ENTRY_LARGE));
 	/* Allocate a shadow segment table */
-	page = alloc_pages(GFP_KERNEL, CRST_ALLOC_ORDER);
+	page = gmap_alloc_crst();
 	if (!page)
 		return -ENOMEM;
-	page->index = sgt & _REGION_ENTRY_ORIGIN;
-	if (fake)
-		page->index |= GMAP_SHADOW_FAKE_TABLE;
-	s_sgt = (unsigned long *) page_to_phys(page);
+	s_sgt = page_to_phys(page);
 	/* Install shadow region second table */
 	spin_lock(&sg->guest_table_lock);
 	table = gmap_table_walk(sg, saddr, 2); /* get region-3 pointer */
@@ -1766,13 +1655,12 @@ int gmap_shadow_sgt(struct gmap *sg, unsigned long saddr, unsigned long sgt,
 		rc = -EAGAIN;		/* Race with shadow */
 		goto out_free;
 	}
-	crst_table_init(s_sgt, _SEGMENT_ENTRY_EMPTY);
+	crst_table_init(__va(s_sgt), _SEGMENT_ENTRY_EMPTY);
 	/* mark as invalid as long as the parent table is not protected */
-	*table = (unsigned long) s_sgt | _REGION_ENTRY_LENGTH |
+	*table = s_sgt | _REGION_ENTRY_LENGTH |
 		 _REGION_ENTRY_TYPE_R3 | _REGION_ENTRY_INVALID;
 	if (sg->edat_level >= 1)
 		*table |= sgt & _REGION_ENTRY_PROTECT;
-	list_add(&page->lru, &sg->crst_list);
 	if (fake) {
 		/* nothing to protect for fake tables */
 		*table &= ~_REGION_ENTRY_INVALID;
@@ -1785,12 +1673,11 @@ int gmap_shadow_sgt(struct gmap *sg, unsigned long saddr, unsigned long sgt,
 	origin = sgt & _REGION_ENTRY_ORIGIN;
 	offset = ((sgt & _REGION_ENTRY_OFFSET) >> 6) * PAGE_SIZE;
 	len = ((sgt & _REGION_ENTRY_LENGTH) + 1) * PAGE_SIZE - offset;
-	rc = gmap_protect_rmap(sg, raddr, origin + offset, len, PROT_READ);
+	rc = gmap_protect_rmap(sg, raddr, origin + offset, len);
 	spin_lock(&sg->guest_table_lock);
 	if (!rc) {
 		table = gmap_table_walk(sg, saddr, 2);
-		if (!table || (*table & _REGION_ENTRY_ORIGIN) !=
-			      (unsigned long) s_sgt)
+		if (!table || (*table & _REGION_ENTRY_ORIGIN) != s_sgt)
 			rc = -EAGAIN;		/* Race with unshadow */
 		else
 			*table &= ~_REGION_ENTRY_INVALID;
@@ -1806,45 +1693,22 @@ out_free:
 }
 EXPORT_SYMBOL_GPL(gmap_shadow_sgt);
 
-/**
- * gmap_shadow_lookup_pgtable - find a shadow page table
- * @sg: pointer to the shadow guest address space structure
- * @saddr: the address in the shadow aguest address space
- * @pgt: parent gmap address of the page table to get shadowed
- * @dat_protection: if the pgtable is marked as protected by dat
- * @fake: pgt references contiguous guest memory block, not a pgtable
- *
- * Returns 0 if the shadow page table was found and -EAGAIN if the page
- * table was not found.
- *
- * Called with sg->mm->mmap_sem in read.
- */
-int gmap_shadow_pgt_lookup(struct gmap *sg, unsigned long saddr,
-			   unsigned long *pgt, int *dat_protection,
-			   int *fake)
+static void gmap_pgste_set_pgt_addr(struct ptdesc *ptdesc, unsigned long pgt_addr)
 {
-	unsigned long *table;
-	struct page *page;
-	int rc;
+	unsigned long *pgstes = page_to_virt(ptdesc_page(ptdesc));
 
-	BUG_ON(!gmap_is_shadow(sg));
-	spin_lock(&sg->guest_table_lock);
-	table = gmap_table_walk(sg, saddr, 1); /* get segment pointer */
-	if (table && !(*table & _SEGMENT_ENTRY_INVALID)) {
-		/* Shadow page tables are full pages (pte+pgste) */
-		page = pfn_to_page(*table >> PAGE_SHIFT);
-		*pgt = page->index & ~GMAP_SHADOW_FAKE_TABLE;
-		*dat_protection = !!(*table & _SEGMENT_ENTRY_PROTECT);
-		*fake = !!(page->index & GMAP_SHADOW_FAKE_TABLE);
-		rc = 0;
-	} else  {
-		rc = -EAGAIN;
-	}
-	spin_unlock(&sg->guest_table_lock);
-	return rc;
+	pgstes += _PAGE_ENTRIES;
 
+	pgstes[0] &= ~PGSTE_ST2_MASK;
+	pgstes[1] &= ~PGSTE_ST2_MASK;
+	pgstes[2] &= ~PGSTE_ST2_MASK;
+	pgstes[3] &= ~PGSTE_ST2_MASK;
+
+	pgstes[0] |= (pgt_addr >> 16) & PGSTE_ST2_MASK;
+	pgstes[1] |= pgt_addr & PGSTE_ST2_MASK;
+	pgstes[2] |= (pgt_addr << 16) & PGSTE_ST2_MASK;
+	pgstes[3] |= (pgt_addr << 32) & PGSTE_ST2_MASK;
 }
-EXPORT_SYMBOL_GPL(gmap_shadow_pgt_lookup);
 
 /**
  * gmap_shadow_pgt - instantiate a shadow page table
@@ -1857,25 +1721,27 @@ EXPORT_SYMBOL_GPL(gmap_shadow_pgt_lookup);
  * shadow table structure is incomplete, -ENOMEM if out of memory,
  * -EFAULT if an address in the parent gmap could not be resolved and
  *
- * Called with gmap->mm->mmap_sem in read
+ * Called with gmap->mm->mmap_lock in read
  */
 int gmap_shadow_pgt(struct gmap *sg, unsigned long saddr, unsigned long pgt,
 		    int fake)
 {
 	unsigned long raddr, origin;
-	unsigned long *s_pgt, *table;
-	struct page *page;
+	unsigned long *table;
+	struct ptdesc *ptdesc;
+	phys_addr_t s_pgt;
 	int rc;
 
 	BUG_ON(!gmap_is_shadow(sg) || (pgt & _SEGMENT_ENTRY_LARGE));
 	/* Allocate a shadow page table */
-	page = page_table_alloc_pgste(sg->mm);
-	if (!page)
+	ptdesc = page_table_alloc_pgste(sg->mm);
+	if (!ptdesc)
 		return -ENOMEM;
-	page->index = pgt & _SEGMENT_ENTRY_ORIGIN;
+	origin = pgt & _SEGMENT_ENTRY_ORIGIN;
 	if (fake)
-		page->index |= GMAP_SHADOW_FAKE_TABLE;
-	s_pgt = (unsigned long *) page_to_phys(page);
+		origin |= GMAP_SHADOW_FAKE_TABLE;
+	gmap_pgste_set_pgt_addr(ptdesc, origin);
+	s_pgt = page_to_phys(ptdesc_page(ptdesc));
 	/* Install shadow page table */
 	spin_lock(&sg->guest_table_lock);
 	table = gmap_table_walk(sg, saddr, 1); /* get segment pointer */
@@ -1893,7 +1759,6 @@ int gmap_shadow_pgt(struct gmap *sg, unsigned long saddr, unsigned long pgt,
 	/* mark as invalid as long as the parent table is not protected */
 	*table = (unsigned long) s_pgt | _SEGMENT_ENTRY |
 		 (pgt & _SEGMENT_ENTRY_PROTECT) | _SEGMENT_ENTRY_INVALID;
-	list_add(&page->lru, &sg->pt_list);
 	if (fake) {
 		/* nothing to protect for fake tables */
 		*table &= ~_SEGMENT_ENTRY_INVALID;
@@ -1904,12 +1769,11 @@ int gmap_shadow_pgt(struct gmap *sg, unsigned long saddr, unsigned long pgt,
 	/* Make pgt read-only in parent gmap page table (not the pgste) */
 	raddr = (saddr & _SEGMENT_MASK) | _SHADOW_RMAP_SEGMENT;
 	origin = pgt & _SEGMENT_ENTRY_ORIGIN & PAGE_MASK;
-	rc = gmap_protect_rmap(sg, raddr, origin, PAGE_SIZE, PROT_READ);
+	rc = gmap_protect_rmap(sg, raddr, origin, PAGE_SIZE);
 	spin_lock(&sg->guest_table_lock);
 	if (!rc) {
 		table = gmap_table_walk(sg, saddr, 1);
-		if (!table || (*table & _SEGMENT_ENTRY_ORIGIN) !=
-			      (unsigned long) s_pgt)
+		if (!table || (*table & _SEGMENT_ENTRY_ORIGIN) != s_pgt)
 			rc = -EAGAIN;		/* Race with unshadow */
 		else
 			*table &= ~_SEGMENT_ENTRY_INVALID;
@@ -1920,7 +1784,7 @@ int gmap_shadow_pgt(struct gmap *sg, unsigned long saddr, unsigned long pgt,
 	return rc;
 out_free:
 	spin_unlock(&sg->guest_table_lock);
-	page_table_free_pgste(page);
+	page_table_free_pgste(ptdesc);
 	return rc;
 
 }
@@ -1936,7 +1800,7 @@ EXPORT_SYMBOL_GPL(gmap_shadow_pgt);
  * shadow table structure is incomplete, -ENOMEM if out of memory and
  * -EFAULT if an address in the parent gmap could not be resolved.
  *
- * Called with sg->mm->mmap_sem in read.
+ * Called with sg->mm->mmap_lock in read.
  */
 int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 {
@@ -1952,7 +1816,7 @@ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 	parent = sg->parent;
 	prot = (pte_val(pte) & _PAGE_PROTECT) ? PROT_READ : PROT_WRITE;
 
-	rmap = kzalloc(sizeof(*rmap), GFP_KERNEL);
+	rmap = kzalloc(sizeof(*rmap), GFP_KERNEL_ACCOUNT);
 	if (!rmap)
 		return -ENOMEM;
 	rmap->raddr = (saddr & PAGE_MASK) | _SHADOW_RMAP_PGTABLE;
@@ -1964,7 +1828,7 @@ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 			rc = vmaddr;
 			break;
 		}
-		rc = radix_tree_preload(GFP_KERNEL);
+		rc = radix_tree_preload(GFP_KERNEL_ACCOUNT);
 		if (rc)
 			break;
 		rc = -EAGAIN;
@@ -1975,7 +1839,7 @@ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 			tptep = (pte_t *) gmap_table_walk(sg, saddr, 0);
 			if (!tptep) {
 				spin_unlock(&sg->guest_table_lock);
-				gmap_pte_op_end(ptl);
+				gmap_pte_op_end(sptep, ptl);
 				radix_tree_preload_end();
 				break;
 			}
@@ -1986,7 +1850,7 @@ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 				rmap = NULL;
 				rc = 0;
 			}
-			gmap_pte_op_end(ptl);
+			gmap_pte_op_end(sptep, ptl);
 			spin_unlock(&sg->guest_table_lock);
 		}
 		radix_tree_preload_end();
@@ -2001,13 +1865,13 @@ int gmap_shadow_page(struct gmap *sg, unsigned long saddr, pte_t pte)
 }
 EXPORT_SYMBOL_GPL(gmap_shadow_page);
 
-/**
+/*
  * gmap_shadow_notify - handle notifications for shadow gmap
  *
  * Called with sg->parent->shadow_lock.
  */
 static void gmap_shadow_notify(struct gmap *sg, unsigned long vmaddr,
-			       unsigned long gaddr, pte_t *pte)
+			       unsigned long gaddr)
 {
 	struct gmap_rmap *rmap, *rnext, *head;
 	unsigned long start, end, bits, raddr;
@@ -2061,7 +1925,7 @@ static void gmap_shadow_notify(struct gmap *sg, unsigned long vmaddr,
 /**
  * ptep_notify - call all invalidation callbacks for a specific pte.
  * @mm: pointer to the process mm_struct
- * @addr: virtual address in the process address space
+ * @vmaddr: virtual address in the process address space
  * @pte: pointer to the page table entry
  * @bits: bits from the pgste that caused the notify call
  *
@@ -2072,7 +1936,6 @@ void ptep_notify(struct mm_struct *mm, unsigned long vmaddr,
 		 pte_t *pte, unsigned long bits)
 {
 	unsigned long offset, gaddr = 0;
-	unsigned long *table;
 	struct gmap *gmap, *sg, *next;
 
 	offset = ((unsigned long) pte) & (255 * sizeof(pte_t));
@@ -2080,19 +1943,16 @@ void ptep_notify(struct mm_struct *mm, unsigned long vmaddr,
 	rcu_read_lock();
 	list_for_each_entry_rcu(gmap, &mm->context.gmap_list, list) {
 		spin_lock(&gmap->guest_table_lock);
-		table = radix_tree_lookup(&gmap->host_to_guest,
-					  vmaddr >> PMD_SHIFT);
-		if (table)
-			gaddr = __gmap_segment_gaddr(table) + offset;
+		gaddr = host_to_guest_lookup(gmap, vmaddr) + offset;
 		spin_unlock(&gmap->guest_table_lock);
-		if (!table)
+		if (!IS_GADDR_VALID(gaddr))
 			continue;
 
 		if (!list_empty(&gmap->children) && (bits & PGSTE_VSIE_BIT)) {
 			spin_lock(&gmap->shadow_lock);
 			list_for_each_entry_safe(sg, next,
 						 &gmap->children, list)
-				gmap_shadow_notify(sg, vmaddr, gaddr, pte);
+				gmap_shadow_notify(sg, vmaddr, gaddr);
 			spin_unlock(&gmap->shadow_lock);
 		}
 		if (bits & PGSTE_IN_BIT)
@@ -2102,54 +1962,251 @@ void ptep_notify(struct mm_struct *mm, unsigned long vmaddr,
 }
 EXPORT_SYMBOL_GPL(ptep_notify);
 
-static inline void thp_split_mm(struct mm_struct *mm)
+static void pmdp_notify_gmap(struct gmap *gmap, pmd_t *pmdp,
+			     unsigned long gaddr)
 {
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-	struct vm_area_struct *vma;
-	unsigned long addr;
-
-	for (vma = mm->mmap; vma != NULL; vma = vma->vm_next) {
-		for (addr = vma->vm_start;
-		     addr < vma->vm_end;
-		     addr += PAGE_SIZE)
-			follow_page(vma, addr, FOLL_SPLIT);
-		vma->vm_flags &= ~VM_HUGEPAGE;
-		vma->vm_flags |= VM_NOHUGEPAGE;
-	}
-	mm->def_flags |= VM_NOHUGEPAGE;
-#endif
+	set_pmd(pmdp, clear_pmd_bit(*pmdp, __pgprot(_SEGMENT_ENTRY_GMAP_IN)));
+	gmap_call_notifier(gmap, gaddr, gaddr + HPAGE_SIZE - 1);
 }
 
-/*
- * Remove all empty zero pages from the mapping for lazy refaulting
- * - This must be called after mm->context.has_pgste is set, to avoid
- *   future creation of zero pages
- * - This must be called after THP was enabled
+/**
+ * gmap_pmdp_xchg - exchange a gmap pmd with another
+ * @gmap: pointer to the guest address space structure
+ * @pmdp: pointer to the pmd entry
+ * @new: replacement entry
+ * @gaddr: the affected guest address
+ *
+ * This function is assumed to be called with the guest_table_lock
+ * held.
  */
-static int __zap_zero_pages(pmd_t *pmd, unsigned long start,
-			   unsigned long end, struct mm_walk *walk)
+static void gmap_pmdp_xchg(struct gmap *gmap, pmd_t *pmdp, pmd_t new,
+			   unsigned long gaddr)
 {
-	unsigned long addr;
+	gaddr &= HPAGE_MASK;
+	pmdp_notify_gmap(gmap, pmdp, gaddr);
+	new = clear_pmd_bit(new, __pgprot(_SEGMENT_ENTRY_GMAP_IN));
+	if (machine_has_tlb_guest())
+		__pmdp_idte(gaddr, (pmd_t *)pmdp, IDTE_GUEST_ASCE, gmap->asce,
+			    IDTE_GLOBAL);
+	else if (cpu_has_idte())
+		__pmdp_idte(gaddr, (pmd_t *)pmdp, 0, 0, IDTE_GLOBAL);
+	else
+		__pmdp_csp(pmdp);
+	set_pmd(pmdp, new);
+}
 
-	for (addr = start; addr != end; addr += PAGE_SIZE) {
-		pte_t *ptep;
-		spinlock_t *ptl;
+static void gmap_pmdp_clear(struct mm_struct *mm, unsigned long vmaddr,
+			    int purge)
+{
+	pmd_t *pmdp;
+	struct gmap *gmap;
+	unsigned long gaddr;
 
-		ptep = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
-		if (is_zero_pfn(pte_pfn(*ptep)))
-			ptep_xchg_direct(walk->mm, addr, ptep, __pte(_PAGE_INVALID));
-		pte_unmap_unlock(ptep, ptl);
+	rcu_read_lock();
+	list_for_each_entry_rcu(gmap, &mm->context.gmap_list, list) {
+		spin_lock(&gmap->guest_table_lock);
+		pmdp = host_to_guest_pmd_delete(gmap, vmaddr, &gaddr);
+		if (pmdp) {
+			pmdp_notify_gmap(gmap, pmdp, gaddr);
+			WARN_ON(pmd_val(*pmdp) & ~(_SEGMENT_ENTRY_HARDWARE_BITS_LARGE |
+						   _SEGMENT_ENTRY_GMAP_UC |
+						   _SEGMENT_ENTRY));
+			if (purge)
+				__pmdp_csp(pmdp);
+			set_pmd(pmdp, __pmd(_SEGMENT_ENTRY_EMPTY));
+		}
+		spin_unlock(&gmap->guest_table_lock);
 	}
+	rcu_read_unlock();
+}
+
+/**
+ * gmap_pmdp_invalidate - invalidate all affected guest pmd entries without
+ *                        flushing
+ * @mm: pointer to the process mm_struct
+ * @vmaddr: virtual address in the process address space
+ */
+void gmap_pmdp_invalidate(struct mm_struct *mm, unsigned long vmaddr)
+{
+	gmap_pmdp_clear(mm, vmaddr, 0);
+}
+EXPORT_SYMBOL_GPL(gmap_pmdp_invalidate);
+
+/**
+ * gmap_pmdp_csp - csp all affected guest pmd entries
+ * @mm: pointer to the process mm_struct
+ * @vmaddr: virtual address in the process address space
+ */
+void gmap_pmdp_csp(struct mm_struct *mm, unsigned long vmaddr)
+{
+	gmap_pmdp_clear(mm, vmaddr, 1);
+}
+EXPORT_SYMBOL_GPL(gmap_pmdp_csp);
+
+/**
+ * gmap_pmdp_idte_local - invalidate and clear a guest pmd entry
+ * @mm: pointer to the process mm_struct
+ * @vmaddr: virtual address in the process address space
+ */
+void gmap_pmdp_idte_local(struct mm_struct *mm, unsigned long vmaddr)
+{
+	unsigned long gaddr;
+	struct gmap *gmap;
+	pmd_t *pmdp;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(gmap, &mm->context.gmap_list, list) {
+		spin_lock(&gmap->guest_table_lock);
+		pmdp = host_to_guest_pmd_delete(gmap, vmaddr, &gaddr);
+		if (pmdp) {
+			pmdp_notify_gmap(gmap, pmdp, gaddr);
+			WARN_ON(pmd_val(*pmdp) & ~(_SEGMENT_ENTRY_HARDWARE_BITS_LARGE |
+						   _SEGMENT_ENTRY_GMAP_UC |
+						   _SEGMENT_ENTRY));
+			if (machine_has_tlb_guest())
+				__pmdp_idte(gaddr, pmdp, IDTE_GUEST_ASCE,
+					    gmap->asce, IDTE_LOCAL);
+			else if (cpu_has_idte())
+				__pmdp_idte(gaddr, pmdp, 0, 0, IDTE_LOCAL);
+			*pmdp = __pmd(_SEGMENT_ENTRY_EMPTY);
+		}
+		spin_unlock(&gmap->guest_table_lock);
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(gmap_pmdp_idte_local);
+
+/**
+ * gmap_pmdp_idte_global - invalidate and clear a guest pmd entry
+ * @mm: pointer to the process mm_struct
+ * @vmaddr: virtual address in the process address space
+ */
+void gmap_pmdp_idte_global(struct mm_struct *mm, unsigned long vmaddr)
+{
+	unsigned long gaddr;
+	struct gmap *gmap;
+	pmd_t *pmdp;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(gmap, &mm->context.gmap_list, list) {
+		spin_lock(&gmap->guest_table_lock);
+		pmdp = host_to_guest_pmd_delete(gmap, vmaddr, &gaddr);
+		if (pmdp) {
+			pmdp_notify_gmap(gmap, pmdp, gaddr);
+			WARN_ON(pmd_val(*pmdp) & ~(_SEGMENT_ENTRY_HARDWARE_BITS_LARGE |
+						   _SEGMENT_ENTRY_GMAP_UC |
+						   _SEGMENT_ENTRY));
+			if (machine_has_tlb_guest())
+				__pmdp_idte(gaddr, pmdp, IDTE_GUEST_ASCE,
+					    gmap->asce, IDTE_GLOBAL);
+			else if (cpu_has_idte())
+				__pmdp_idte(gaddr, pmdp, 0, 0, IDTE_GLOBAL);
+			else
+				__pmdp_csp(pmdp);
+			*pmdp = __pmd(_SEGMENT_ENTRY_EMPTY);
+		}
+		spin_unlock(&gmap->guest_table_lock);
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(gmap_pmdp_idte_global);
+
+/**
+ * gmap_test_and_clear_dirty_pmd - test and reset segment dirty status
+ * @gmap: pointer to guest address space
+ * @pmdp: pointer to the pmd to be tested
+ * @gaddr: virtual address in the guest address space
+ *
+ * This function is assumed to be called with the guest_table_lock
+ * held.
+ */
+static bool gmap_test_and_clear_dirty_pmd(struct gmap *gmap, pmd_t *pmdp,
+					  unsigned long gaddr)
+{
+	if (pmd_val(*pmdp) & _SEGMENT_ENTRY_INVALID)
+		return false;
+
+	/* Already protected memory, which did not change is clean */
+	if (pmd_val(*pmdp) & _SEGMENT_ENTRY_PROTECT &&
+	    !(pmd_val(*pmdp) & _SEGMENT_ENTRY_GMAP_UC))
+		return false;
+
+	/* Clear UC indication and reset protection */
+	set_pmd(pmdp, clear_pmd_bit(*pmdp, __pgprot(_SEGMENT_ENTRY_GMAP_UC)));
+	gmap_protect_pmd(gmap, gaddr, pmdp, PROT_READ, 0);
+	return true;
+}
+
+/**
+ * gmap_sync_dirty_log_pmd - set bitmap based on dirty status of segment
+ * @gmap: pointer to guest address space
+ * @bitmap: dirty bitmap for this pmd
+ * @gaddr: virtual address in the guest address space
+ * @vmaddr: virtual address in the host address space
+ *
+ * This function is assumed to be called with the guest_table_lock
+ * held.
+ */
+void gmap_sync_dirty_log_pmd(struct gmap *gmap, unsigned long bitmap[4],
+			     unsigned long gaddr, unsigned long vmaddr)
+{
+	int i;
+	pmd_t *pmdp;
+	pte_t *ptep;
+	spinlock_t *ptl;
+
+	pmdp = gmap_pmd_op_walk(gmap, gaddr);
+	if (!pmdp)
+		return;
+
+	if (pmd_leaf(*pmdp)) {
+		if (gmap_test_and_clear_dirty_pmd(gmap, pmdp, gaddr))
+			bitmap_fill(bitmap, _PAGE_ENTRIES);
+	} else {
+		for (i = 0; i < _PAGE_ENTRIES; i++, vmaddr += PAGE_SIZE) {
+			ptep = pte_alloc_map_lock(gmap->mm, pmdp, vmaddr, &ptl);
+			if (!ptep)
+				continue;
+			if (ptep_test_and_clear_uc(gmap->mm, vmaddr, ptep))
+				set_bit(i, bitmap);
+			pte_unmap_unlock(ptep, ptl);
+		}
+	}
+	gmap_pmd_op_end(gmap, pmdp);
+}
+EXPORT_SYMBOL_GPL(gmap_sync_dirty_log_pmd);
+
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+static int thp_split_walk_pmd_entry(pmd_t *pmd, unsigned long addr,
+				    unsigned long end, struct mm_walk *walk)
+{
+	struct vm_area_struct *vma = walk->vma;
+
+	split_huge_pmd(vma, pmd, addr);
 	return 0;
 }
 
-static inline void zap_zero_pages(struct mm_struct *mm)
-{
-	struct mm_walk walk = { .pmd_entry = __zap_zero_pages };
+static const struct mm_walk_ops thp_split_walk_ops = {
+	.pmd_entry	= thp_split_walk_pmd_entry,
+	.walk_lock	= PGWALK_WRLOCK_VERIFY,
+};
 
-	walk.mm = mm;
-	walk_page_range(0, TASK_SIZE, &walk);
+static inline void thp_split_mm(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
+
+	for_each_vma(vmi, vma) {
+		vm_flags_mod(vma, VM_NOHUGEPAGE, VM_HUGEPAGE);
+		walk_page_vma(vma, &thp_split_walk_ops, NULL);
+	}
+	mm->def_flags |= VM_NOHUGEPAGE;
 }
+#else
+static inline void thp_split_mm(struct mm_struct *mm)
+{
+}
+#endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
 /*
  * switch on pgstes for its userspace process (for kvm)
@@ -2161,15 +2218,11 @@ int s390_enable_sie(void)
 	/* Do we have pgstes? if yes, we are done */
 	if (mm_has_pgste(mm))
 		return 0;
-	/* Fail if the page tables are 2K */
-	if (!mm_alloc_pgste(mm))
-		return -EINVAL;
-	down_write(&mm->mmap_sem);
+	mmap_write_lock(mm);
 	mm->context.has_pgste = 1;
 	/* split thp mappings and disable thp for future mappings */
 	thp_split_mm(mm);
-	zap_zero_pages(mm);
-	up_write(&mm->mmap_sem);
+	mmap_write_unlock(mm);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(s390_enable_sie);
@@ -2178,41 +2231,78 @@ EXPORT_SYMBOL_GPL(s390_enable_sie);
  * Enable storage key handling from now on and initialize the storage
  * keys with the default key.
  */
-static int __s390_enable_skey(pte_t *pte, unsigned long addr,
-			      unsigned long next, struct mm_walk *walk)
+static int __s390_enable_skey_pte(pte_t *pte, unsigned long addr,
+				  unsigned long next, struct mm_walk *walk)
 {
 	/* Clear storage key */
 	ptep_zap_key(walk->mm, addr, pte);
 	return 0;
 }
 
+/*
+ * Give a chance to schedule after setting a key to 256 pages.
+ * We only hold the mm lock, which is a rwsem and the kvm srcu.
+ * Both can sleep.
+ */
+static int __s390_enable_skey_pmd(pmd_t *pmd, unsigned long addr,
+				  unsigned long next, struct mm_walk *walk)
+{
+	cond_resched();
+	return 0;
+}
+
+static int __s390_enable_skey_hugetlb(pte_t *pte, unsigned long addr,
+				      unsigned long hmask, unsigned long next,
+				      struct mm_walk *walk)
+{
+	pmd_t *pmd = (pmd_t *)pte;
+	unsigned long start, end;
+	struct folio *folio = page_folio(pmd_page(*pmd));
+
+	/*
+	 * The write check makes sure we do not set a key on shared
+	 * memory. This is needed as the walker does not differentiate
+	 * between actual guest memory and the process executable or
+	 * shared libraries.
+	 */
+	if (pmd_val(*pmd) & _SEGMENT_ENTRY_INVALID ||
+	    !(pmd_val(*pmd) & _SEGMENT_ENTRY_WRITE))
+		return 0;
+
+	start = pmd_val(*pmd) & HPAGE_MASK;
+	end = start + HPAGE_SIZE;
+	__storage_key_init_range(start, end);
+	set_bit(PG_arch_1, &folio->flags);
+	cond_resched();
+	return 0;
+}
+
+static const struct mm_walk_ops enable_skey_walk_ops = {
+	.hugetlb_entry		= __s390_enable_skey_hugetlb,
+	.pte_entry		= __s390_enable_skey_pte,
+	.pmd_entry		= __s390_enable_skey_pmd,
+	.walk_lock		= PGWALK_WRLOCK,
+};
+
 int s390_enable_skey(void)
 {
-	struct mm_walk walk = { .pte_entry = __s390_enable_skey };
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
 	int rc = 0;
 
-	down_write(&mm->mmap_sem);
-	if (mm_use_skey(mm))
+	mmap_write_lock(mm);
+	if (mm_uses_skeys(mm))
 		goto out_up;
 
-	mm->context.use_skey = 1;
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		if (ksm_madvise(vma, vma->vm_start, vma->vm_end,
-				MADV_UNMERGEABLE, &vma->vm_flags)) {
-			mm->context.use_skey = 0;
-			rc = -ENOMEM;
-			goto out_up;
-		}
+	mm->context.uses_skeys = 1;
+	rc = gmap_helper_disable_cow_sharing();
+	if (rc) {
+		mm->context.uses_skeys = 0;
+		goto out_up;
 	}
-	mm->def_flags &= ~VM_MERGEABLE;
-
-	walk.mm = mm;
-	walk_page_range(0, TASK_SIZE, &walk);
+	walk_page_range(mm, 0, TASK_SIZE, &enable_skey_walk_ops, NULL);
 
 out_up:
-	up_write(&mm->mmap_sem);
+	mmap_write_unlock(mm);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(s390_enable_skey);
@@ -2227,13 +2317,137 @@ static int __s390_reset_cmma(pte_t *pte, unsigned long addr,
 	return 0;
 }
 
+static const struct mm_walk_ops reset_cmma_walk_ops = {
+	.pte_entry		= __s390_reset_cmma,
+	.walk_lock		= PGWALK_WRLOCK,
+};
+
 void s390_reset_cmma(struct mm_struct *mm)
 {
-	struct mm_walk walk = { .pte_entry = __s390_reset_cmma };
-
-	down_write(&mm->mmap_sem);
-	walk.mm = mm;
-	walk_page_range(0, TASK_SIZE, &walk);
-	up_write(&mm->mmap_sem);
+	mmap_write_lock(mm);
+	walk_page_range(mm, 0, TASK_SIZE, &reset_cmma_walk_ops, NULL);
+	mmap_write_unlock(mm);
 }
 EXPORT_SYMBOL_GPL(s390_reset_cmma);
+
+#define GATHER_GET_PAGES 32
+
+struct reset_walk_state {
+	unsigned long next;
+	unsigned long count;
+	unsigned long pfns[GATHER_GET_PAGES];
+};
+
+static int s390_gather_pages(pte_t *ptep, unsigned long addr,
+			     unsigned long next, struct mm_walk *walk)
+{
+	struct reset_walk_state *p = walk->private;
+	pte_t pte = READ_ONCE(*ptep);
+
+	if (pte_present(pte)) {
+		/* we have a reference from the mapping, take an extra one */
+		get_page(phys_to_page(pte_val(pte)));
+		p->pfns[p->count] = phys_to_pfn(pte_val(pte));
+		p->next = next;
+		p->count++;
+	}
+	return p->count >= GATHER_GET_PAGES;
+}
+
+static const struct mm_walk_ops gather_pages_ops = {
+	.pte_entry = s390_gather_pages,
+	.walk_lock = PGWALK_RDLOCK,
+};
+
+/*
+ * Call the Destroy secure page UVC on each page in the given array of PFNs.
+ * Each page needs to have an extra reference, which will be released here.
+ */
+void s390_uv_destroy_pfns(unsigned long count, unsigned long *pfns)
+{
+	struct folio *folio;
+	unsigned long i;
+
+	for (i = 0; i < count; i++) {
+		folio = pfn_folio(pfns[i]);
+		/* we always have an extra reference */
+		uv_destroy_folio(folio);
+		/* get rid of the extra reference */
+		folio_put(folio);
+		cond_resched();
+	}
+}
+EXPORT_SYMBOL_GPL(s390_uv_destroy_pfns);
+
+/**
+ * __s390_uv_destroy_range - Call the destroy secure page UVC on each page
+ * in the given range of the given address space.
+ * @mm: the mm to operate on
+ * @start: the start of the range
+ * @end: the end of the range
+ * @interruptible: if not 0, stop when a fatal signal is received
+ *
+ * Walk the given range of the given address space and call the destroy
+ * secure page UVC on each page. Optionally exit early if a fatal signal is
+ * pending.
+ *
+ * Return: 0 on success, -EINTR if the function stopped before completing
+ */
+int __s390_uv_destroy_range(struct mm_struct *mm, unsigned long start,
+			    unsigned long end, bool interruptible)
+{
+	struct reset_walk_state state = { .next = start };
+	int r = 1;
+
+	while (r > 0) {
+		state.count = 0;
+		mmap_read_lock(mm);
+		r = walk_page_range(mm, state.next, end, &gather_pages_ops, &state);
+		mmap_read_unlock(mm);
+		cond_resched();
+		s390_uv_destroy_pfns(state.count, state.pfns);
+		if (interruptible && fatal_signal_pending(current))
+			return -EINTR;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(__s390_uv_destroy_range);
+
+/**
+ * s390_replace_asce - Try to replace the current ASCE of a gmap with a copy
+ * @gmap: the gmap whose ASCE needs to be replaced
+ *
+ * If the ASCE is a SEGMENT type then this function will return -EINVAL,
+ * otherwise the pointers in the host_to_guest radix tree will keep pointing
+ * to the wrong pages, causing use-after-free and memory corruption.
+ * If the allocation of the new top level page table fails, the ASCE is not
+ * replaced.
+ * In any case, the old ASCE is always removed from the gmap CRST list.
+ * Therefore the caller has to make sure to save a pointer to it
+ * beforehand, unless a leak is actually intended.
+ */
+int s390_replace_asce(struct gmap *gmap)
+{
+	unsigned long asce;
+	struct page *page;
+	void *table;
+
+	/* Replacing segment type ASCEs would cause serious issues */
+	if ((gmap->asce & _ASCE_TYPE_MASK) == _ASCE_TYPE_SEGMENT)
+		return -EINVAL;
+
+	page = gmap_alloc_crst();
+	if (!page)
+		return -ENOMEM;
+	table = page_to_virt(page);
+	memcpy(table, gmap->table, 1UL << (CRST_ALLOC_ORDER + PAGE_SHIFT));
+
+	/* Set new table origin while preserving existing ASCE control bits */
+	asce = (gmap->asce & ~_ASCE_ORIGIN) | __pa(table);
+	WRITE_ONCE(gmap->asce, asce);
+	WRITE_ONCE(gmap->mm->context.gmap_asce, asce);
+	WRITE_ONCE(gmap->table, table);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(s390_replace_asce);

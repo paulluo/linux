@@ -1,18 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*  D-Link DL2000-based Gigabit Ethernet Adapter Linux driver */
 /*
     Copyright (c) 2001, 2002 by D-Link Corporation
     Written by Edward Peng.<edward_peng@dlink.com.tw>
     Created 03-May-2001, base on Linux' sundance.c.
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
 */
 
-#define DRV_NAME	"DL2000/TC902x-based linux driver"
-#define DRV_VERSION	"v1.19"
-#define DRV_RELDATE	"2007/08/12"
 #include "dl2k.h"
 #include <linux/dma-mapping.h>
 
@@ -23,8 +17,6 @@
 #define dr16(reg)	ioread16(ioaddr + (reg))
 #define dr8(reg)	ioread8(ioaddr + (reg))
 
-static char version[] =
-      KERN_INFO DRV_NAME " " DRV_VERSION " " DRV_RELDATE "\n";
 #define MAX_UNITS 8
 static int mtu[MAX_UNITS];
 static int vlan[MAX_UNITS];
@@ -68,8 +60,8 @@ static const int max_intrloop = 50;
 static const int multicast_filter_limit = 0x40;
 
 static int rio_open (struct net_device *dev);
-static void rio_timer (unsigned long data);
-static void rio_tx_timeout (struct net_device *dev);
+static void rio_timer (struct timer_list *t);
+static void rio_tx_timeout (struct net_device *dev, unsigned int txqueue);
 static netdev_tx_t start_xmit (struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t rio_interrupt (int irq, void *dev_instance);
 static void rio_free_tx (struct net_device *dev, int irq);
@@ -103,9 +95,16 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_set_rx_mode	= set_multicast,
-	.ndo_do_ioctl		= rio_ioctl,
+	.ndo_eth_ioctl		= rio_ioctl,
 	.ndo_tx_timeout		= rio_tx_timeout,
 };
+
+static bool is_support_rmon_mmio(struct pci_dev *pdev)
+{
+	return pdev->vendor == PCI_VENDOR_ID_DLINK &&
+	       pdev->device == 0x4000 &&
+	       pdev->revision == 0x0c;
+}
 
 static int
 rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -116,12 +115,8 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 	int chip_idx = ent->driver_data;
 	int err, irq;
 	void __iomem *ioaddr;
-	static int version_printed;
 	void *ring_space;
 	dma_addr_t ring_dma;
-
-	if (!version_printed++)
-		printk ("%s", version);
 
 	err = pci_enable_device (pdev);
 	if (err)
@@ -143,21 +138,27 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	np = netdev_priv(dev);
 
+	if (is_support_rmon_mmio(pdev))
+		np->rmon_enable = true;
+
 	/* IO registers range. */
 	ioaddr = pci_iomap(pdev, 0, 0);
 	if (!ioaddr)
 		goto err_out_dev;
 	np->eeprom_addr = ioaddr;
 
-#ifdef MEM_MAPPING
-	/* MM registers range. */
-	ioaddr = pci_iomap(pdev, 1, 0);
-	if (!ioaddr)
-		goto err_out_iounmap;
-#endif
+	if (np->rmon_enable) {
+		/* MM registers range. */
+		ioaddr = pci_iomap(pdev, 1, 0);
+		if (!ioaddr)
+			goto err_out_iounmap;
+	}
+
 	np->ioaddr = ioaddr;
 	np->chip_id = chip_idx;
 	np->pdev = pdev;
+
+	spin_lock_init(&np->stats_lock);
 	spin_lock_init (&np->tx_lock);
 	spin_lock_init (&np->rx_lock);
 
@@ -234,13 +235,15 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_drvdata (pdev, dev);
 
-	ring_space = pci_alloc_consistent (pdev, TX_TOTAL_SIZE, &ring_dma);
+	ring_space = dma_alloc_coherent(&pdev->dev, TX_TOTAL_SIZE, &ring_dma,
+					GFP_KERNEL);
 	if (!ring_space)
 		goto err_out_iounmap;
 	np->tx_ring = ring_space;
 	np->tx_ring_dma = ring_dma;
 
-	ring_space = pci_alloc_consistent (pdev, RX_TOTAL_SIZE, &ring_dma);
+	ring_space = dma_alloc_coherent(&pdev->dev, RX_TOTAL_SIZE, &ring_dma,
+					GFP_KERNEL);
 	if (!ring_space)
 		goto err_out_unmap_tx;
 	np->rx_ring = ring_space;
@@ -291,13 +294,14 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 
 err_out_unmap_rx:
-	pci_free_consistent (pdev, RX_TOTAL_SIZE, np->rx_ring, np->rx_ring_dma);
+	dma_free_coherent(&pdev->dev, RX_TOTAL_SIZE, np->rx_ring,
+			  np->rx_ring_dma);
 err_out_unmap_tx:
-	pci_free_consistent (pdev, TX_TOTAL_SIZE, np->tx_ring, np->tx_ring_dma);
+	dma_free_coherent(&pdev->dev, TX_TOTAL_SIZE, np->tx_ring,
+			  np->tx_ring_dma);
 err_out_iounmap:
-#ifdef MEM_MAPPING
-	pci_iounmap(pdev, np->ioaddr);
-#endif
+	if (np->rmon_enable)
+		pci_iounmap(pdev, np->ioaddr);
 	pci_iounmap(pdev, np->eeprom_addr);
 err_out_dev:
 	free_netdev (dev);
@@ -313,7 +317,7 @@ find_miiphy (struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	int i, phy_found = 0;
-	np = netdev_priv(dev);
+
 	np->phy_addr = 1;
 
 	for (i = 31; i >= 0; i--) {
@@ -357,11 +361,10 @@ parse_eeprom (struct net_device *dev)
 	}
 
 	/* Set MAC address */
-	for (i = 0; i < 6; i++)
-		dev->dev_addr[i] = psrom->mac_addr[i];
+	eth_hw_addr_set(dev, psrom->mac_addr);
 
 	if (np->chip_id == CHIP_IP1000A) {
-		np->led_mode = psrom->led_mode;
+		np->led_mode = le16_to_cpu(psrom->led_mode);
 		return 0;
 	}
 
@@ -447,8 +450,9 @@ static void free_list(struct net_device *dev)
 	for (i = 0; i < RX_RING_SIZE; i++) {
 		skb = np->rx_skbuff[i];
 		if (skb) {
-			pci_unmap_single(np->pdev, desc_to_dma(&np->rx_ring[i]),
-					 skb->len, PCI_DMA_FROMDEVICE);
+			dma_unmap_single(&np->pdev->dev,
+					 desc_to_dma(&np->rx_ring[i]),
+					 skb->len, DMA_FROM_DEVICE);
 			dev_kfree_skb(skb);
 			np->rx_skbuff[i] = NULL;
 		}
@@ -458,8 +462,9 @@ static void free_list(struct net_device *dev)
 	for (i = 0; i < TX_RING_SIZE; i++) {
 		skb = np->tx_skbuff[i];
 		if (skb) {
-			pci_unmap_single(np->pdev, desc_to_dma(&np->tx_ring[i]),
-					 skb->len, PCI_DMA_TODEVICE);
+			dma_unmap_single(&np->pdev->dev,
+					 desc_to_dma(&np->tx_ring[i]),
+					 skb->len, DMA_TO_DEVICE);
 			dev_kfree_skb(skb);
 			np->tx_skbuff[i] = NULL;
 		}
@@ -516,9 +521,8 @@ static int alloc_list(struct net_device *dev)
 						sizeof(struct netdev_desc));
 		/* Rubicon now supports 40 bits of addressing space. */
 		np->rx_ring[i].fraginfo =
-		    cpu_to_le64(pci_map_single(
-				  np->pdev, skb->data, np->rx_buf_sz,
-				  PCI_DMA_FROMDEVICE));
+		    cpu_to_le64(dma_map_single(&np->pdev->dev, skb->data,
+					       np->rx_buf_sz, DMA_FROM_DEVICE));
 		np->rx_ring[i].fraginfo |= cpu_to_le64((u64)np->rx_buf_sz << 48);
 	}
 
@@ -573,8 +577,7 @@ static void rio_hw_init(struct net_device *dev)
 	 * too. However, it doesn't work on IP1000A so we use 16-bit access.
 	 */
 	for (i = 0; i < 3; i++)
-		dw16(StationAddr0 + 2 * i,
-		     cpu_to_le16(((u16 *)dev->dev_addr)[i]));
+		dw16(StationAddr0 + 2 * i, get_unaligned_le16(&dev->dev_addr[2 * i]));
 
 	set_multicast (dev);
 	if (np->coalesce) {
@@ -585,7 +588,8 @@ static void rio_hw_init(struct net_device *dev)
 	dw8(TxDMAPollPeriod, 0xff);
 	dw8(RxDMABurstThresh, 0x30);
 	dw8(RxDMAUrgentThresh, 0x30);
-	dw32(RmonStatMask, 0x0007ffff);
+	if (!np->rmon_enable)
+		dw32(RmonStatMask, 0x0007ffff);
 	/* clear statistics */
 	clear_stats (dev);
 
@@ -644,7 +648,7 @@ static int rio_open(struct net_device *dev)
 		return i;
 	}
 
-	setup_timer(&np->timer, rio_timer, (unsigned long)dev);
+	timer_setup(&np->timer, rio_timer, 0);
 	np->timer.expires = jiffies + 1 * HZ;
 	add_timer(&np->timer);
 
@@ -655,10 +659,10 @@ static int rio_open(struct net_device *dev)
 }
 
 static void
-rio_timer (unsigned long data)
+rio_timer (struct timer_list *t)
 {
-	struct net_device *dev = (struct net_device *)data;
-	struct netdev_private *np = netdev_priv(dev);
+	struct netdev_private *np = timer_container_of(np, t, timer);
+	struct net_device *dev = pci_get_drvdata(np->pdev);
 	unsigned int entry;
 	int next_tick = 1*HZ;
 	unsigned long flags;
@@ -684,9 +688,8 @@ rio_timer (unsigned long data)
 				}
 				np->rx_skbuff[entry] = skb;
 				np->rx_ring[entry].fraginfo =
-				    cpu_to_le64 (pci_map_single
-					 (np->pdev, skb->data, np->rx_buf_sz,
-					  PCI_DMA_FROMDEVICE));
+				    cpu_to_le64 (dma_map_single(&np->pdev->dev, skb->data,
+								np->rx_buf_sz, DMA_FROM_DEVICE));
 			}
 			np->rx_ring[entry].fraginfo |=
 			    cpu_to_le64((u64)np->rx_buf_sz << 48);
@@ -699,7 +702,7 @@ rio_timer (unsigned long data)
 }
 
 static void
-rio_tx_timeout (struct net_device *dev)
+rio_tx_timeout (struct net_device *dev, unsigned int txqueue)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	void __iomem *ioaddr = np->ioaddr;
@@ -740,9 +743,8 @@ start_xmit (struct sk_buff *skb, struct net_device *dev)
 		    ((u64)np->vlan << 32) |
 		    ((u64)skb->priority << 45);
 	}
-	txdesc->fraginfo = cpu_to_le64 (pci_map_single (np->pdev, skb->data,
-							skb->len,
-							PCI_DMA_TODEVICE));
+	txdesc->fraginfo = cpu_to_le64 (dma_map_single(&np->pdev->dev, skb->data,
+						       skb->len, DMA_TO_DEVICE));
 	txdesc->fraginfo |= cpu_to_le64((u64)skb->len << 48);
 
 	/* DL2K bug: DMA fails to get next descriptor ptr in 10Mbps mode
@@ -824,7 +826,6 @@ rio_free_tx (struct net_device *dev, int irq)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	int entry = np->old_tx % TX_RING_SIZE;
-	int tx_use = 0;
 	unsigned long flag = 0;
 
 	if (irq)
@@ -839,17 +840,16 @@ rio_free_tx (struct net_device *dev, int irq)
 		if (!(np->tx_ring[entry].status & cpu_to_le64(TFDDone)))
 			break;
 		skb = np->tx_skbuff[entry];
-		pci_unmap_single (np->pdev,
-				  desc_to_dma(&np->tx_ring[entry]),
-				  skb->len, PCI_DMA_TODEVICE);
+		dma_unmap_single(&np->pdev->dev,
+				 desc_to_dma(&np->tx_ring[entry]), skb->len,
+				 DMA_TO_DEVICE);
 		if (irq)
-			dev_kfree_skb_irq (skb);
+			dev_consume_skb_irq(skb);
 		else
-			dev_kfree_skb (skb);
+			dev_kfree_skb(skb);
 
 		np->tx_skbuff[entry] = NULL;
 		entry = (entry + 1) % TX_RING_SIZE;
-		tx_use++;
 	}
 	if (irq)
 		spin_unlock(&np->tx_lock);
@@ -878,7 +878,6 @@ tx_error (struct net_device *dev, int tx_status)
 	frame_id = (tx_status & 0xffff0000);
 	printk (KERN_ERR "%s: Transmit error, TxStatus %4.4x, FrameId %d.\n",
 		dev->name, tx_status, frame_id);
-	dev->stats.tx_errors++;
 	/* Ttransmit Underrun */
 	if (tx_status & 0x10) {
 		dev->stats.tx_fifo_errors++;
@@ -915,9 +914,15 @@ tx_error (struct net_device *dev, int tx_status)
 		rio_set_led_mode(dev);
 		/* Let TxStartThresh stay default value */
 	}
+
+	spin_lock(&np->stats_lock);
 	/* Maximum Collisions */
 	if (tx_status & 0x08)
 		dev->stats.collisions++;
+
+	dev->stats.tx_errors++;
+	spin_unlock(&np->stats_lock);
+
 	/* Restart the Tx */
 	dw32(MACCtrl, dr16(MACCtrl) | TxEnable);
 }
@@ -961,25 +966,25 @@ receive_packet (struct net_device *dev)
 
 			/* Small skbuffs for short packets */
 			if (pkt_len > copy_thresh) {
-				pci_unmap_single (np->pdev,
-						  desc_to_dma(desc),
-						  np->rx_buf_sz,
-						  PCI_DMA_FROMDEVICE);
+				dma_unmap_single(&np->pdev->dev,
+						 desc_to_dma(desc),
+						 np->rx_buf_sz,
+						 DMA_FROM_DEVICE);
 				skb_put (skb = np->rx_skbuff[entry], pkt_len);
 				np->rx_skbuff[entry] = NULL;
 			} else if ((skb = netdev_alloc_skb_ip_align(dev, pkt_len))) {
-				pci_dma_sync_single_for_cpu(np->pdev,
-							    desc_to_dma(desc),
-							    np->rx_buf_sz,
-							    PCI_DMA_FROMDEVICE);
+				dma_sync_single_for_cpu(&np->pdev->dev,
+							desc_to_dma(desc),
+							np->rx_buf_sz,
+							DMA_FROM_DEVICE);
 				skb_copy_to_linear_data (skb,
 						  np->rx_skbuff[entry]->data,
 						  pkt_len);
 				skb_put (skb, pkt_len);
-				pci_dma_sync_single_for_device(np->pdev,
-							       desc_to_dma(desc),
-							       np->rx_buf_sz,
-							       PCI_DMA_FROMDEVICE);
+				dma_sync_single_for_device(&np->pdev->dev,
+							   desc_to_dma(desc),
+							   np->rx_buf_sz,
+							   DMA_FROM_DEVICE);
 			}
 			skb->protocol = eth_type_trans (skb, dev);
 #if 0
@@ -1012,9 +1017,8 @@ receive_packet (struct net_device *dev)
 			}
 			np->rx_skbuff[entry] = skb;
 			np->rx_ring[entry].fraginfo =
-			    cpu_to_le64 (pci_map_single
-					 (np->pdev, skb->data, np->rx_buf_sz,
-					  PCI_DMA_FROMDEVICE));
+			    cpu_to_le64(dma_map_single(&np->pdev->dev, skb->data,
+						       np->rx_buf_sz, DMA_FROM_DEVICE));
 		}
 		np->rx_ring[entry].fraginfo |=
 		    cpu_to_le64((u64)np->rx_buf_sz << 48);
@@ -1083,11 +1087,10 @@ get_stats (struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	void __iomem *ioaddr = np->ioaddr;
-#ifdef MEM_MAPPING
-	int i;
-#endif
 	unsigned int stat_reg;
+	unsigned long flags;
 
+	spin_lock_irqsave(&np->stats_lock, flags);
 	/* All statistics registers need to be acknowledged,
 	   else statistic overflow could cause problems */
 
@@ -1096,7 +1099,7 @@ get_stats (struct net_device *dev)
 	dev->stats.rx_bytes += dr32(OctetRcvOk);
 	dev->stats.tx_bytes += dr32(OctetXmtOk);
 
-	dev->stats.multicast = dr32(McstFramesRcvdOk);
+	dev->stats.multicast += dr32(McstFramesRcvdOk);
 	dev->stats.collisions += dr32(SingleColFrames)
 			     +  dr32(MultiColFrames);
 
@@ -1128,15 +1131,18 @@ get_stats (struct net_device *dev)
 	dr16(MacControlFramesXmtd);
 	dr16(FramesWEXDeferal);
 
-#ifdef MEM_MAPPING
-	for (i = 0x100; i <= 0x150; i += 4)
-		dr32(i);
-#endif
+	if (np->rmon_enable)
+		for (int i = 0x100; i <= 0x150; i += 4)
+			dr32(i);
+
 	dr16(TxJumboFrames);
 	dr16(RxJumboFrames);
 	dr16(TCPCheckSumErrors);
 	dr16(UDPCheckSumErrors);
 	dr16(IPCheckSumErrors);
+
+	spin_unlock_irqrestore(&np->stats_lock, flags);
+
 	return &dev->stats;
 }
 
@@ -1145,9 +1151,6 @@ clear_stats (struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	void __iomem *ioaddr = np->ioaddr;
-#ifdef MEM_MAPPING
-	int i;
-#endif
 
 	/* All statistics registers need to be acknowledged,
 	   else statistic overflow could cause problems */
@@ -1183,10 +1186,9 @@ clear_stats (struct net_device *dev)
 	dr16(BcstFramesXmtdOk);
 	dr16(MacControlFramesXmtd);
 	dr16(FramesWEXDeferal);
-#ifdef MEM_MAPPING
-	for (i = 0x100; i <= 0x150; i += 4)
-		dr32(i);
-#endif
+	if (np->rmon_enable)
+		for (int i = 0x100; i <= 0x150; i += 4)
+			dr32(i);
 	dr16(TxJumboFrames);
 	dr16(RxJumboFrames);
 	dr16(TCPCheckSumErrors);
@@ -1246,9 +1248,8 @@ static void rio_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info
 {
 	struct netdev_private *np = netdev_priv(dev);
 
-	strlcpy(info->driver, "dl2k", sizeof(info->driver));
-	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
-	strlcpy(info->bus_info, pci_name(np->pdev), sizeof(info->bus_info));
+	strscpy(info->driver, "dl2k", sizeof(info->driver));
+	strscpy(info->bus_info, pci_name(np->pdev), sizeof(info->bus_info));
 }
 
 static int rio_get_link_ksettings(struct net_device *dev,
@@ -1793,7 +1794,7 @@ rio_close (struct net_device *dev)
 	rio_hw_stop(dev);
 
 	free_irq(pdev->irq, dev);
-	del_timer_sync (&np->timer);
+	timer_delete_sync(&np->timer);
 
 	free_list(dev);
 
@@ -1809,13 +1810,12 @@ rio_remove1 (struct pci_dev *pdev)
 		struct netdev_private *np = netdev_priv(dev);
 
 		unregister_netdev (dev);
-		pci_free_consistent (pdev, RX_TOTAL_SIZE, np->rx_ring,
-				     np->rx_ring_dma);
-		pci_free_consistent (pdev, TX_TOTAL_SIZE, np->tx_ring,
-				     np->tx_ring_dma);
-#ifdef MEM_MAPPING
-		pci_iounmap(pdev, np->ioaddr);
-#endif
+		dma_free_coherent(&pdev->dev, RX_TOTAL_SIZE, np->rx_ring,
+				  np->rx_ring_dma);
+		dma_free_coherent(&pdev->dev, TX_TOTAL_SIZE, np->tx_ring,
+				  np->tx_ring_dma);
+		if (np->rmon_enable)
+			pci_iounmap(pdev, np->ioaddr);
 		pci_iounmap(pdev, np->eeprom_addr);
 		free_netdev (dev);
 		pci_release_regions (pdev);
@@ -1833,7 +1833,7 @@ static int rio_suspend(struct device *device)
 		return 0;
 
 	netif_device_detach(dev);
-	del_timer_sync(&np->timer);
+	timer_delete_sync(&np->timer);
 	rio_hw_stop(dev);
 
 	return 0;
@@ -1857,7 +1857,7 @@ static int rio_resume(struct device *device)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(rio_pm_ops, rio_suspend, rio_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(rio_pm_ops, rio_suspend, rio_resume);
 #define RIO_PM_OPS    (&rio_pm_ops)
 
 #else
@@ -1875,13 +1875,5 @@ static struct pci_driver rio_driver = {
 };
 
 module_pci_driver(rio_driver);
-/*
 
-Compile command:
-
-gcc -D__KERNEL__ -DMODULE -I/usr/src/linux/include -Wall -Wstrict-prototypes -O2 -c dl2k.c
-
-Read Documentation/networking/dl2k.txt for details.
-
-*/
-
+/* Read Documentation/networking/device_drivers/ethernet/dlink/dl2k.rst. */

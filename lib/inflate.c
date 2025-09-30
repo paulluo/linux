@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #define DEBG(x)
 #define DEBG1(x)
 /* inflate.c -- Not copyrighted 1992 by Mark Adler
@@ -1256,8 +1257,6 @@ static int INIT gunzip(void)
     /* Decompress */
     if ((res = inflate())) {
 	    switch (res) {
-	    case 0:
-		    break;
 	    case 1:
 		    error("invalid compressed format (err=1)");
 		    break;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -11,7 +12,7 @@
 struct kmem_cache *task_xstate_cachep = NULL;
 unsigned int xstate_size;
 
-#ifdef CONFIG_CC_STACKPROTECTOR
+#ifdef CONFIG_STACKPROTECTOR
 unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
 #endif
@@ -22,9 +23,7 @@ EXPORT_SYMBOL(__stack_chk_guard);
  */
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
-#ifdef CONFIG_SUPERH32
 	unlazy_fpu(src, task_pt_regs(src));
-#endif
 	*dst = *src;
 
 	if (src->thread.xstate) {
@@ -58,7 +57,7 @@ void arch_task_cache_init(void)
 
 	task_xstate_cachep = kmem_cache_create("task_xstate", xstate_size,
 					       __alignof__(union thread_xstate),
-					       SLAB_PANIC | SLAB_NOTRACK, NULL);
+					       SLAB_PANIC, NULL);
 }
 
 #ifdef CONFIG_SH_FPU_EMU

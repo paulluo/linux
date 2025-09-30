@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef __842_H__
 #define __842_H__
@@ -77,7 +78,7 @@
 #include <linux/kernel.h>
 #include <linux/bitops.h>
 #include <linux/crc32.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <linux/sw842.h>
 

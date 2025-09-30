@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Copyright (C) 2000 YAEGASHI Takeshi
  *	Hitachi HD64461 companion chip support
@@ -71,7 +72,7 @@ static void hd64461_irq_demux(struct irq_desc *desc)
 	}
 }
 
-int __init setup_hd64461(void)
+static int __init setup_hd64461(void)
 {
 	int irq_base, i;
 

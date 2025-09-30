@@ -9,7 +9,7 @@
  */
 
 #include <linux/cdrom.h>
-#include <linux/genhd.h>
+#include <linux/blkdev.h>
 #include <linux/nls.h>
 #include <linux/slab.h>
 
@@ -32,29 +32,35 @@
 static int hfs_get_last_session(struct super_block *sb,
 				sector_t *start, sector_t *size)
 {
-	struct cdrom_multisession ms_info;
-	struct cdrom_tocentry te;
-	int res;
+	struct cdrom_device_info *cdi = disk_to_cdi(sb->s_bdev->bd_disk);
 
 	/* default values */
 	*start = 0;
-	*size = i_size_read(sb->s_bdev->bd_inode) >> 9;
+	*size = bdev_nr_sectors(sb->s_bdev);
 
 	if (HFS_SB(sb)->session >= 0) {
+		struct cdrom_tocentry te;
+	
+		if (!cdi)
+			return -EINVAL;
+
 		te.cdte_track = HFS_SB(sb)->session;
 		te.cdte_format = CDROM_LBA;
-		res = ioctl_by_bdev(sb->s_bdev, CDROMREADTOCENTRY, (unsigned long)&te);
-		if (!res && (te.cdte_ctrl & CDROM_DATA_TRACK) == 4) {
-			*start = (sector_t)te.cdte_addr.lba << 2;
-			return 0;
+		if (cdrom_read_tocentry(cdi, &te) ||
+		    (te.cdte_ctrl & CDROM_DATA_TRACK) != 4) {
+			pr_err("invalid session number or type of track\n");
+			return -EINVAL;
 		}
-		pr_err("invalid session number or type of track\n");
-		return -EINVAL;
+
+		*start = (sector_t)te.cdte_addr.lba << 2;
+	} else if (cdi) {
+		struct cdrom_multisession ms_info;
+
+		ms_info.addr_format = CDROM_LBA;
+		if (cdrom_multisession(cdi, &ms_info) == 0 && ms_info.xa_flag)
+			*start = (sector_t)ms_info.addr.lba << 2;
 	}
-	ms_info.addr_format = CDROM_LBA;
-	res = ioctl_by_bdev(sb->s_bdev, CDROMMULTISESSION, (unsigned long)&ms_info);
-	if (!res && ms_info.xa_flag)
-		*start = (sector_t)ms_info.addr.lba << 2;
+
 	return 0;
 }
 
@@ -144,11 +150,11 @@ int hfs_mdb_get(struct super_block *sb)
 
 	/* These parameters are read from and written to the MDB */
 	HFS_SB(sb)->free_ablocks = be16_to_cpu(mdb->drFreeBks);
-	HFS_SB(sb)->next_id = be32_to_cpu(mdb->drNxtCNID);
+	atomic64_set(&HFS_SB(sb)->next_id, be32_to_cpu(mdb->drNxtCNID));
 	HFS_SB(sb)->root_files = be16_to_cpu(mdb->drNmFls);
 	HFS_SB(sb)->root_dirs = be16_to_cpu(mdb->drNmRtDirs);
-	HFS_SB(sb)->file_count = be32_to_cpu(mdb->drFilCnt);
-	HFS_SB(sb)->folder_count = be32_to_cpu(mdb->drDirCnt);
+	atomic64_set(&HFS_SB(sb)->file_count, be32_to_cpu(mdb->drFilCnt));
+	atomic64_set(&HFS_SB(sb)->folder_count, be32_to_cpu(mdb->drDirCnt));
 
 	/* TRY to get the alternate (backup) MDB. */
 	sect = part_start + part_size - 2;
@@ -166,7 +172,7 @@ int hfs_mdb_get(struct super_block *sb)
 		pr_warn("continuing without an alternate MDB\n");
 	}
 
-	HFS_SB(sb)->bitmap = kmalloc(8192, GFP_KERNEL);
+	HFS_SB(sb)->bitmap = kzalloc(8192, GFP_KERNEL);
 	if (!HFS_SB(sb)->bitmap)
 		goto out;
 
@@ -204,11 +210,11 @@ int hfs_mdb_get(struct super_block *sb)
 	attrib = mdb->drAtrb;
 	if (!(attrib & cpu_to_be16(HFS_SB_ATTRIB_UNMNT))) {
 		pr_warn("filesystem was not cleanly unmounted, running fsck.hfs is recommended.  mounting read-only.\n");
-		sb->s_flags |= MS_RDONLY;
+		sb->s_flags |= SB_RDONLY;
 	}
 	if ((attrib & cpu_to_be16(HFS_SB_ATTRIB_SLOCK))) {
 		pr_warn("filesystem is marked locked, mounting read-only.\n");
-		sb->s_flags |= MS_RDONLY;
+		sb->s_flags |= SB_RDONLY;
 	}
 	if (!sb_rdonly(sb)) {
 		/* Mark the volume uncleanly unmounted in case we crash */
@@ -267,11 +273,17 @@ void hfs_mdb_commit(struct super_block *sb)
 		/* These parameters may have been modified, so write them back */
 		mdb->drLsMod = hfs_mtime();
 		mdb->drFreeBks = cpu_to_be16(HFS_SB(sb)->free_ablocks);
-		mdb->drNxtCNID = cpu_to_be32(HFS_SB(sb)->next_id);
+		BUG_ON(atomic64_read(&HFS_SB(sb)->next_id) > U32_MAX);
+		mdb->drNxtCNID =
+			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->next_id));
 		mdb->drNmFls = cpu_to_be16(HFS_SB(sb)->root_files);
 		mdb->drNmRtDirs = cpu_to_be16(HFS_SB(sb)->root_dirs);
-		mdb->drFilCnt = cpu_to_be32(HFS_SB(sb)->file_count);
-		mdb->drDirCnt = cpu_to_be32(HFS_SB(sb)->folder_count);
+		BUG_ON(atomic64_read(&HFS_SB(sb)->file_count) > U32_MAX);
+		mdb->drFilCnt =
+			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->file_count));
+		BUG_ON(atomic64_read(&HFS_SB(sb)->folder_count) > U32_MAX);
+		mdb->drDirCnt =
+			cpu_to_be32((u32)atomic64_read(&HFS_SB(sb)->folder_count));
 
 		/* write MDB to disk */
 		mark_buffer_dirty(HFS_SB(sb)->mdb_bh);

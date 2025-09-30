@@ -29,6 +29,7 @@
 #define B53_ARLIO_PAGE			0x05 /* ARL Access */
 #define B53_FRAMEBUF_PAGE		0x06 /* Management frame access */
 #define B53_MEM_ACCESS_PAGE		0x08 /* Memory access */
+#define B53_IEEE_PAGE			0x0a /* IEEE 802.1X */
 
 /* PHY Registers */
 #define B53_PORT_MII_PAGE(i)		(0x10 + (i)) /* Port i MII Registers */
@@ -49,6 +50,12 @@
 
 /* Jumbo Frame Registers */
 #define B53_JUMBO_PAGE			0x40
+
+/* EAP Registers */
+#define B53_EAP_PAGE			0x42
+
+/* EEE Control Registers Page */
+#define B53_EEE_PAGE			0x92
 
 /* CFP Configuration Registers Page */
 #define B53_CFP_PAGE			0xa1
@@ -89,17 +96,22 @@
 #define   PORT_OVERRIDE_SPEED_10M	(0 << PORT_OVERRIDE_SPEED_S)
 #define   PORT_OVERRIDE_SPEED_100M	(1 << PORT_OVERRIDE_SPEED_S)
 #define   PORT_OVERRIDE_SPEED_1000M	(2 << PORT_OVERRIDE_SPEED_S)
+#define   PORT_OVERRIDE_LP_FLOW_25	BIT(3) /* BCM5325 only */
 #define   PORT_OVERRIDE_RV_MII_25	BIT(4) /* BCM5325 only */
 #define   PORT_OVERRIDE_RX_FLOW		BIT(4)
 #define   PORT_OVERRIDE_TX_FLOW		BIT(5)
 #define   PORT_OVERRIDE_SPEED_2000M	BIT(6) /* BCM5301X only, requires setting 1000M */
 #define   PORT_OVERRIDE_EN		BIT(7) /* Use the register contents */
 
-/* Power-down mode control */
+/* Power-down mode control (8 bit) */
 #define B53_PD_MODE_CTRL_25		0x0f
+#define  PD_MODE_PORT_MASK		0x1f
+/* Bit 0 also powers down the switch. */
+#define  PD_MODE_POWER_DOWN_PORT(i)	BIT(i)
 
 /* IP Multicast control (8 bit) */
 #define B53_IP_MULTICAST_CTRL		0x21
+#define  B53_IP_MCAST_25		BIT(0)
 #define  B53_IPMC_FWD_EN		BIT(1)
 #define  B53_UC_FWD_EN			BIT(6)
 #define  B53_MC_FWD_EN			BIT(7)
@@ -112,6 +124,7 @@
 #define B53_UC_FLOOD_MASK		0x32
 #define B53_MC_FLOOD_MASK		0x34
 #define B53_IPMC_FLOOD_MASK		0x36
+#define B53_DIS_LEARNING		0x3c
 
 /*
  * Override Ports 0-7 State on devices with xMII interfaces (8 bit)
@@ -134,6 +147,7 @@
 
 #define B53_RGMII_CTRL_IMP		0x60
 #define   RGMII_CTRL_ENABLE_GMII	BIT(7)
+#define   RGMII_CTRL_MII_OVERRIDE	BIT(6)
 #define   RGMII_CTRL_TIMING_SEL		BIT(2)
 #define   RGMII_CTRL_DLL_RXC		BIT(1)
 #define   RGMII_CTRL_DLL_TXC		BIT(0)
@@ -210,6 +224,14 @@
 #define B53_BRCM_HDR			0x03
 #define   BRCM_HDR_P8_EN		BIT(0) /* Enable tagging on port 8 */
 #define   BRCM_HDR_P5_EN		BIT(1) /* Enable tagging on port 5 */
+#define   BRCM_HDR_P7_EN		BIT(2) /* Enable tagging on port 7 */
+
+/* Aging Time control register (32 bit) */
+#define B53_AGING_TIME_CONTROL		0x06
+#define B53_AGING_TIME_CONTROL_63XX	0x08
+#define  AGE_CHANGE			BIT(20)
+#define  AGE_TIME_MASK			0x7ffff
+#define  AGE_TIME_MAX			1048575
 
 /* Mirror capture control register (16 bit) */
 #define B53_MIR_CAP_CTL			0x10
@@ -249,6 +271,12 @@
 /* Revision ID register (8 bit) */
 #define B53_REV_ID			0x40
 
+/* Broadcom header RX control (16 bit) */
+#define B53_BRCM_HDR_RX_DIS		0x60
+
+/* Broadcom header TX control (16 bit)	*/
+#define B53_BRCM_HDR_TX_DIS		0x62
+
 /*************************************************************************
  * ARL Access Page Registers
  *************************************************************************/
@@ -282,6 +310,7 @@
 /* ARL Table Read/Write Register (8 bit) */
 #define B53_ARLTBL_RW_CTRL		0x00
 #define    ARLTBL_RW			BIT(0)
+#define    ARLTBL_IVL_SVL_SELECT	BIT(6)
 #define    ARLTBL_START_DONE		BIT(7)
 
 /* MAC Address Index Register (48 bit) */
@@ -294,24 +323,28 @@
  *
  * BCM5325 and BCM5365 share most definitions below
  */
-#define B53_ARLTBL_MAC_VID_ENTRY(n)	(0x10 * (n))
+#define B53_ARLTBL_MAC_VID_ENTRY(n)	((0x10 * (n)) + 0x10)
 #define   ARLTBL_MAC_MASK		0xffffffffffffULL
 #define   ARLTBL_VID_S			48
 #define   ARLTBL_VID_MASK_25		0xff
 #define   ARLTBL_VID_MASK		0xfff
 #define   ARLTBL_DATA_PORT_ID_S_25	48
 #define   ARLTBL_DATA_PORT_ID_MASK_25	0xf
-#define   ARLTBL_AGE_25			BIT(61)
-#define   ARLTBL_STATIC_25		BIT(62)
-#define   ARLTBL_VALID_25		BIT(63)
+#define   ARLTBL_VID_S_65		53
+#define   ARLTBL_AGE_25			BIT_ULL(61)
+#define   ARLTBL_STATIC_25		BIT_ULL(62)
+#define   ARLTBL_VALID_25		BIT_ULL(63)
 
 /* ARL Table Data Entry N Registers (32 bit) */
-#define B53_ARLTBL_DATA_ENTRY(n)	((0x10 * (n)) + 0x08)
+#define B53_ARLTBL_DATA_ENTRY(n)	((0x10 * (n)) + 0x18)
 #define   ARLTBL_DATA_PORT_ID_MASK	0x1ff
 #define   ARLTBL_TC(tc)			((3 & tc) << 11)
 #define   ARLTBL_AGE			BIT(14)
 #define   ARLTBL_STATIC			BIT(15)
 #define   ARLTBL_VALID			BIT(16)
+
+/* Maximum number of bin entries in the ARL for all switches */
+#define B53_ARLTBL_MAX_BIN_ENTRIES	4
 
 /* ARL Search Control Register (8 bit) */
 #define B53_ARL_SRCH_CTL		0x50
@@ -338,6 +371,18 @@
 
 #define B53_ARL_SRCH_RSTL_MACVID(x)	(B53_ARL_SRCH_RSTL_0_MACVID + ((x) * 0x10))
 #define B53_ARL_SRCH_RSTL(x)		(B53_ARL_SRCH_RSTL_0 + ((x) * 0x10))
+
+/*************************************************************************
+ * IEEE 802.1X Registers
+ *************************************************************************/
+
+/* Multicast DLF Drop Control register (16 bit) */
+#define B53_IEEE_MCAST_DLF		0x94
+#define B53_IEEE_MCAST_DROP_EN		BIT(11)
+
+/* Unicast DLF Drop Control register (16 bit) */
+#define B53_IEEE_UCAST_DLF		0x96
+#define B53_IEEE_UCAST_DROP_EN		BIT(11)
 
 /*************************************************************************
  * Port VLAN Registers
@@ -463,6 +508,55 @@
 #define B53_JUMBO_MAX_SIZE_63XX		0x08
 #define   JMS_MIN_SIZE			1518
 #define   JMS_MAX_SIZE			9724
+
+/*************************************************************************
+ * EAP Page Registers
+ *************************************************************************/
+#define B53_PORT_EAP_CONF(i)		(0x20 + 8 * (i))
+#define  EAP_MODE_SHIFT			51
+#define  EAP_MODE_SHIFT_63XX		50
+#define  EAP_MODE_MASK			(0x3ull << EAP_MODE_SHIFT)
+#define  EAP_MODE_MASK_63XX		(0x3ull << EAP_MODE_SHIFT_63XX)
+#define  EAP_MODE_BASIC			0
+#define  EAP_MODE_SIMPLIFIED		3
+
+/*************************************************************************
+ * EEE Configuration Page Registers
+ *************************************************************************/
+
+/* EEE Enable control register (16 bit) */
+#define B53_EEE_EN_CTRL			0x00
+
+/* EEE LPI assert status register (16 bit) */
+#define B53_EEE_LPI_ASSERT_STS		0x02
+
+/* EEE LPI indicate status register (16 bit) */
+#define B53_EEE_LPI_INDICATE		0x4
+
+/* EEE Receiving idle symbols status register (16 bit) */
+#define B53_EEE_RX_IDLE_SYM_STS		0x6
+
+/* EEE Pipeline timer register (32 bit) */
+#define B53_EEE_PIP_TIMER		0xC
+
+/* EEE Sleep timer Gig register (32 bit) */
+#define B53_EEE_SLEEP_TIMER_GIG(i)	(0x10 + 4 * (i))
+
+/* EEE Sleep timer FE register (32 bit) */
+#define B53_EEE_SLEEP_TIMER_FE(i)	(0x34 + 4 * (i))
+
+/* EEE Minimum LP timer Gig register (32 bit) */
+#define B53_EEE_MIN_LP_TIMER_GIG(i)	(0x58 + 4 * (i))
+
+/* EEE Minimum LP timer FE register (32 bit) */
+#define B53_EEE_MIN_LP_TIMER_FE(i)	(0x7c + 4 * (i))
+
+/* EEE Wake timer Gig register (16 bit) */
+#define B53_EEE_WAKE_TIMER_GIG(i)	(0xa0 + 2 * (i))
+
+/* EEE Wake timer FE register (16 bit) */
+#define B53_EEE_WAKE_TIMER_FE(i)	(0xb2 + 2 * (i))
+
 
 /*************************************************************************
  * CFP Configuration Page Registers

@@ -12,8 +12,8 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -71,6 +71,8 @@
 
 /* timeout (ms) for pm runtime autosuspend */
 #define SPRD_I2C_PM_TIMEOUT	1000
+/* timeout (ms) for transfer message */
+#define I2C_XFER_TIMEOUT	1000
 
 /* SPRD i2c data structure */
 struct sprd_i2c {
@@ -243,6 +245,7 @@ static int sprd_i2c_handle_msg(struct i2c_adapter *i2c_adap,
 			       struct i2c_msg *msg, bool is_last_msg)
 {
 	struct sprd_i2c *i2c_dev = i2c_adap->algo_data;
+	unsigned long time_left;
 
 	i2c_dev->msg = msg;
 	i2c_dev->buf = msg->buf;
@@ -272,18 +275,21 @@ static int sprd_i2c_handle_msg(struct i2c_adapter *i2c_adap,
 
 	sprd_i2c_opt_start(i2c_dev);
 
-	wait_for_completion(&i2c_dev->complete);
+	time_left = wait_for_completion_timeout(&i2c_dev->complete,
+				msecs_to_jiffies(I2C_XFER_TIMEOUT));
+	if (!time_left)
+		return -ETIMEDOUT;
 
 	return i2c_dev->err;
 }
 
-static int sprd_i2c_master_xfer(struct i2c_adapter *i2c_adap,
-				struct i2c_msg *msgs, int num)
+static int sprd_i2c_xfer(struct i2c_adapter *i2c_adap,
+			 struct i2c_msg *msgs, int num)
 {
 	struct sprd_i2c *i2c_dev = i2c_adap->algo_data;
 	int im, ret;
 
-	ret = pm_runtime_get_sync(i2c_dev->dev);
+	ret = pm_runtime_resume_and_get(i2c_dev->dev);
 	if (ret < 0)
 		return ret;
 
@@ -308,7 +314,7 @@ static u32 sprd_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm sprd_i2c_algo = {
-	.master_xfer = sprd_i2c_master_xfer,
+	.xfer = sprd_i2c_xfer,
 	.functionality = sprd_i2c_func,
 };
 
@@ -336,9 +342,9 @@ static void sprd_i2c_set_clk(struct sprd_i2c *i2c_dev, u32 freq)
 	writel(div1, i2c_dev->base + ADDR_DVD1);
 
 	/* Start hold timing = hold time(us) * source clock */
-	if (freq == 400000)
+	if (freq == I2C_MAX_FAST_MODE_FREQ)
 		writel((6 * apb_clk) / 10000000, i2c_dev->base + ADDR_STA0_DVD);
-	else if (freq == 100000)
+	else if (freq == I2C_MAX_STANDARD_MODE_FREQ)
 		writel((4 * apb_clk) / 1000000, i2c_dev->base + ADDR_STA0_DVD);
 }
 
@@ -364,21 +370,20 @@ static irqreturn_t sprd_i2c_isr_thread(int irq, void *dev_id)
 	struct sprd_i2c *i2c_dev = dev_id;
 	struct i2c_msg *msg = i2c_dev->msg;
 	bool ack = !(readl(i2c_dev->base + I2C_STATUS) & I2C_RX_ACK);
-	u32 i2c_count = readl(i2c_dev->base + I2C_COUNT);
 	u32 i2c_tran;
 
 	if (msg->flags & I2C_M_RD)
 		i2c_tran = i2c_dev->count >= I2C_FIFO_FULL_THLD;
 	else
-		i2c_tran = i2c_count;
+		i2c_tran = i2c_dev->count;
 
 	/*
-	 * If we got one ACK from slave when writing data, and we did not
+	 * If we got one ACK from target when writing data, and we did not
 	 * finish this transmission (i2c_tran is not zero), then we should
 	 * continue to write data.
 	 *
 	 * For reading data, ack is always true, if i2c_tran is not 0 which
-	 * means we still need to contine to read data from slave.
+	 * means we still need to contine to read data from target.
 	 */
 	if (i2c_tran && ack) {
 		sprd_i2c_data_transfer(i2c_dev);
@@ -388,7 +393,7 @@ static irqreturn_t sprd_i2c_isr_thread(int irq, void *dev_id)
 	i2c_dev->err = 0;
 
 	/*
-	 * If we did not get one ACK from slave when writing data, we should
+	 * If we did not get one ACK from target when writing data, we should
 	 * return -EIO to notify users.
 	 */
 	if (!ack)
@@ -408,17 +413,16 @@ static irqreturn_t sprd_i2c_isr(int irq, void *dev_id)
 {
 	struct sprd_i2c *i2c_dev = dev_id;
 	struct i2c_msg *msg = i2c_dev->msg;
-	u32 i2c_count = readl(i2c_dev->base + I2C_COUNT);
 	bool ack = !(readl(i2c_dev->base + I2C_STATUS) & I2C_RX_ACK);
 	u32 i2c_tran;
 
 	if (msg->flags & I2C_M_RD)
 		i2c_tran = i2c_dev->count >= I2C_FIFO_FULL_THLD;
 	else
-		i2c_tran = i2c_count;
+		i2c_tran = i2c_dev->count;
 
 	/*
-	 * If we did not get one ACK from slave when writing data, then we
+	 * If we did not get one ACK from target when writing data, then we
 	 * should finish this transmission since we got some errors.
 	 *
 	 * When writing data, if i2c_tran == 0 which means we have writen
@@ -467,9 +471,9 @@ static int sprd_i2c_clk_init(struct sprd_i2c *i2c_dev)
 
 	i2c_dev->clk = devm_clk_get(i2c_dev->dev, "enable");
 	if (IS_ERR(i2c_dev->clk)) {
-		dev_warn(i2c_dev->dev, "i2c%d can't get the enable clock\n",
-			 i2c_dev->adap.nr);
-		i2c_dev->clk = NULL;
+		dev_err(i2c_dev->dev, "i2c%d can't get the enable clock\n",
+			i2c_dev->adap.nr);
+		return PTR_ERR(i2c_dev->clk);
 	}
 
 	return 0;
@@ -479,7 +483,6 @@ static int sprd_i2c_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct sprd_i2c *i2c_dev;
-	struct resource *res;
 	u32 prop;
 	int ret;
 
@@ -489,23 +492,20 @@ static int sprd_i2c_probe(struct platform_device *pdev)
 	if (!i2c_dev)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	i2c_dev->base = devm_ioremap_resource(dev, res);
+	i2c_dev->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(i2c_dev->base))
 		return PTR_ERR(i2c_dev->base);
 
 	i2c_dev->irq = platform_get_irq(pdev, 0);
-	if (i2c_dev->irq < 0) {
-		dev_err(&pdev->dev, "failed to get irq resource\n");
+	if (i2c_dev->irq < 0)
 		return i2c_dev->irq;
-	}
 
 	i2c_set_adapdata(&i2c_dev->adap, i2c_dev);
 	init_completion(&i2c_dev->complete);
 	snprintf(i2c_dev->adap.name, sizeof(i2c_dev->adap.name),
 		 "%s", "sprd-i2c");
 
-	i2c_dev->bus_freq = 100000;
+	i2c_dev->bus_freq = I2C_MAX_STANDARD_MODE_FREQ;
 	i2c_dev->adap.owner = THIS_MODULE;
 	i2c_dev->dev = dev;
 	i2c_dev->adap.retries = 3;
@@ -519,10 +519,14 @@ static int sprd_i2c_probe(struct platform_device *pdev)
 		i2c_dev->bus_freq = prop;
 
 	/* We only support 100k and 400k now, otherwise will return error. */
-	if (i2c_dev->bus_freq != 100000 && i2c_dev->bus_freq != 400000)
+	if (i2c_dev->bus_freq != I2C_MAX_STANDARD_MODE_FREQ &&
+	    i2c_dev->bus_freq != I2C_MAX_FAST_MODE_FREQ)
 		return -EINVAL;
 
-	sprd_i2c_clk_init(i2c_dev);
+	ret = sprd_i2c_clk_init(i2c_dev);
+	if (ret)
+		return ret;
+
 	platform_set_drvdata(pdev, i2c_dev);
 
 	ret = clk_prepare_enable(i2c_dev->clk);
@@ -566,46 +570,52 @@ err_rpm_put:
 	return ret;
 }
 
-static int sprd_i2c_remove(struct platform_device *pdev)
+static void sprd_i2c_remove(struct platform_device *pdev)
 {
 	struct sprd_i2c *i2c_dev = platform_get_drvdata(pdev);
 	int ret;
 
 	ret = pm_runtime_get_sync(i2c_dev->dev);
 	if (ret < 0)
-		return ret;
+		dev_err(&pdev->dev, "Failed to resume device (%pe)\n", ERR_PTR(ret));
 
 	i2c_del_adapter(&i2c_dev->adap);
-	clk_disable_unprepare(i2c_dev->clk);
+
+	if (ret >= 0)
+		clk_disable_unprepare(i2c_dev->clk);
 
 	pm_runtime_put_noidle(i2c_dev->dev);
 	pm_runtime_disable(i2c_dev->dev);
-
-	return 0;
 }
 
-static int __maybe_unused sprd_i2c_suspend_noirq(struct device *pdev)
+static int __maybe_unused sprd_i2c_suspend_noirq(struct device *dev)
 {
-	return pm_runtime_force_suspend(pdev);
+	struct sprd_i2c *i2c_dev = dev_get_drvdata(dev);
+
+	i2c_mark_adapter_suspended(&i2c_dev->adap);
+	return pm_runtime_force_suspend(dev);
 }
 
-static int __maybe_unused sprd_i2c_resume_noirq(struct device *pdev)
+static int __maybe_unused sprd_i2c_resume_noirq(struct device *dev)
 {
-	return pm_runtime_force_resume(pdev);
+	struct sprd_i2c *i2c_dev = dev_get_drvdata(dev);
+
+	i2c_mark_adapter_resumed(&i2c_dev->adap);
+	return pm_runtime_force_resume(dev);
 }
 
-static int __maybe_unused sprd_i2c_runtime_suspend(struct device *pdev)
+static int __maybe_unused sprd_i2c_runtime_suspend(struct device *dev)
 {
-	struct sprd_i2c *i2c_dev = dev_get_drvdata(pdev);
+	struct sprd_i2c *i2c_dev = dev_get_drvdata(dev);
 
 	clk_disable_unprepare(i2c_dev->clk);
 
 	return 0;
 }
 
-static int __maybe_unused sprd_i2c_runtime_resume(struct device *pdev)
+static int __maybe_unused sprd_i2c_runtime_resume(struct device *dev)
 {
-	struct sprd_i2c *i2c_dev = dev_get_drvdata(pdev);
+	struct sprd_i2c *i2c_dev = dev_get_drvdata(dev);
 	int ret;
 
 	ret = clk_prepare_enable(i2c_dev->clk);
@@ -627,7 +637,9 @@ static const struct dev_pm_ops sprd_i2c_pm_ops = {
 
 static const struct of_device_id sprd_i2c_of_match[] = {
 	{ .compatible = "sprd,sc9860-i2c", },
+	{},
 };
+MODULE_DEVICE_TABLE(of, sprd_i2c_of_match);
 
 static struct platform_driver sprd_i2c_driver = {
 	.probe = sprd_i2c_probe,
@@ -639,8 +651,7 @@ static struct platform_driver sprd_i2c_driver = {
 	},
 };
 
-static int sprd_i2c_init(void)
-{
-	return platform_driver_register(&sprd_i2c_driver);
-}
-arch_initcall_sync(sprd_i2c_init);
+module_platform_driver(sprd_i2c_driver);
+
+MODULE_DESCRIPTION("Spreadtrum I2C controller driver");
+MODULE_LICENSE("GPL v2");

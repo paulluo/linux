@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _ASM_POWERPC_AUXVEC_H
 #define _ASM_POWERPC_AUXVEC_H
 
@@ -47,6 +48,8 @@
 #define AT_L3_CACHESIZE		46
 #define AT_L3_CACHEGEOMETRY	47
 
-#define AT_VECTOR_SIZE_ARCH	14 /* entries in ARCH_DLINFO */
+#define AT_MINSIGSTKSZ		51      /* stack needed for signal delivery */
+
+#define AT_VECTOR_SIZE_ARCH	15 /* entries in ARCH_DLINFO */
 
 #endif

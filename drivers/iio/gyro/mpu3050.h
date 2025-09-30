@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/iio/iio.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
@@ -90,7 +91,7 @@ int mpu3050_common_probe(struct device *dev,
 			 struct regmap *map,
 			 int irq,
 			 const char *name);
-int mpu3050_common_remove(struct device *dev);
+void mpu3050_common_remove(struct device *dev);
 
 /* PM ops */
 extern const struct dev_pm_ops mpu3050_dev_pm_ops;

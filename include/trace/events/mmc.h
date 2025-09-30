@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM mmc
 
@@ -67,7 +68,7 @@ TRACE_EVENT(mmc_request_start,
 		__entry->need_retune = host->need_retune;
 		__entry->hold_retune = host->hold_retune;
 		__entry->retune_period = host->retune_period;
-		__assign_str(name, mmc_hostname(host));
+		__assign_str(name);
 		__entry->mrq = mrq;
 	),
 
@@ -85,8 +86,8 @@ TRACE_EVENT(mmc_request_start,
 		  __entry->stop_flags, __entry->stop_retries,
 		  __entry->sbc_opcode, __entry->sbc_arg,
 		  __entry->sbc_flags, __entry->sbc_retries,
-		  __entry->blocks, __entry->blk_addr,
-		  __entry->blksz, __entry->data_flags, __entry->tag,
+		  __entry->blocks, __entry->blksz,
+		  __entry->blk_addr, __entry->data_flags, __entry->tag,
 		  __entry->can_retune, __entry->doing_retune,
 		  __entry->retune_now, __entry->need_retune,
 		  __entry->hold_retune, __entry->retune_period)
@@ -155,7 +156,7 @@ TRACE_EVENT(mmc_request_done,
 		__entry->need_retune = host->need_retune;
 		__entry->hold_retune = host->hold_retune;
 		__entry->retune_period = host->retune_period;
-		__assign_str(name, mmc_hostname(host));
+		__assign_str(name);
 		__entry->mrq = mrq;
 	),
 

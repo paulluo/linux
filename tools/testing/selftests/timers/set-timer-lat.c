@@ -28,24 +28,12 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <include/vdso/time64.h>
 #include "../kselftest.h"
 
-#define CLOCK_REALTIME			0
-#define CLOCK_MONOTONIC			1
-#define CLOCK_PROCESS_CPUTIME_ID	2
-#define CLOCK_THREAD_CPUTIME_ID		3
-#define CLOCK_MONOTONIC_RAW		4
-#define CLOCK_REALTIME_COARSE		5
-#define CLOCK_MONOTONIC_COARSE		6
-#define CLOCK_BOOTTIME			7
-#define CLOCK_REALTIME_ALARM		8
-#define CLOCK_BOOTTIME_ALARM		9
+/* CLOCK_HWSPECIFIC == CLOCK_SGI_CYCLE (Deprecated) */
 #define CLOCK_HWSPECIFIC		10
-#define CLOCK_TAI			11
-#define NR_CLOCKIDS			12
 
-
-#define NSEC_PER_SEC 1000000000ULL
 #define UNRESONABLE_LATENCY 40000000 /* 40ms in nanosecs */
 
 #define TIMER_SECS 1
@@ -80,7 +68,7 @@ char *clockstring(int clockid)
 		return "CLOCK_BOOTTIME_ALARM";
 	case CLOCK_TAI:
 		return "CLOCK_TAI";
-	};
+	}
 	return "UNKNOWN_CLOCKID";
 }
 
@@ -143,7 +131,8 @@ int setup_timer(int clock_id, int flags, int interval, timer_t *tm1)
 			printf("%-22s %s missing CAP_WAKE_ALARM?    : [UNSUPPORTED]\n",
 					clockstring(clock_id),
 					flags ? "ABSTIME":"RELTIME");
-			return 0;
+			/* Indicate timer isn't set, so caller doesn't wait */
+			return 1;
 		}
 		printf("%s - timer_create() failed\n", clockstring(clock_id));
 		return -1;
@@ -213,8 +202,9 @@ int do_timer(int clock_id, int flags)
 	int err;
 
 	err = setup_timer(clock_id, flags, interval, &tm1);
+	/* Unsupported case - return 0 to not fail the test */
 	if (err)
-		return err;
+		return err == 1 ? 0 : err;
 
 	while (alarmcount < 5)
 		sleep(1);
@@ -228,18 +218,17 @@ int do_timer_oneshot(int clock_id, int flags)
 	timer_t tm1;
 	const int interval = 0;
 	struct timeval timeout;
-	fd_set fds;
 	int err;
 
 	err = setup_timer(clock_id, flags, interval, &tm1);
+	/* Unsupported case - return 0 to not fail the test */
 	if (err)
-		return err;
+		return err == 1 ? 0 : err;
 
 	memset(&timeout, 0, sizeof(timeout));
 	timeout.tv_sec = 5;
-	FD_ZERO(&fds);
 	do {
-		err = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+		err = select(0, NULL, NULL, NULL, &timeout);
 	} while (err == -1 && errno == EINTR);
 
 	timer_delete(tm1);
@@ -253,6 +242,7 @@ int main(void)
 	struct sigaction act;
 	int signum = SIGRTMAX;
 	int ret = 0;
+	int max_clocks = CLOCK_TAI + 1;
 
 	/* Set up signal handler: */
 	sigfillset(&act.sa_mask);
@@ -261,7 +251,7 @@ int main(void)
 	sigaction(signum, &act, NULL);
 
 	printf("Setting timers for every %i seconds\n", TIMER_SECS);
-	for (clock_id = 0; clock_id < NR_CLOCKIDS; clock_id++) {
+	for (clock_id = 0; clock_id < max_clocks; clock_id++) {
 
 		if ((clock_id == CLOCK_PROCESS_CPUTIME_ID) ||
 				(clock_id == CLOCK_THREAD_CPUTIME_ID) ||
@@ -277,6 +267,6 @@ int main(void)
 		ret |= do_timer_oneshot(clock_id, 0);
 	}
 	if (ret)
-		return ksft_exit_fail();
-	return ksft_exit_pass();
+		ksft_exit_fail();
+	ksft_exit_pass();
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPIBLKTRACE_H
 #define _UAPIBLKTRACE_H
 
@@ -48,7 +49,7 @@ enum blktrace_act {
 	__BLK_TA_UNPLUG_TIMER,		/* queue was unplugged by timer */
 	__BLK_TA_INSERT,		/* insert request */
 	__BLK_TA_SPLIT,			/* bio was split */
-	__BLK_TA_BOUNCE,		/* bio was bounced */
+	__BLK_TA_BOUNCE,		/* unused, was: bio was bounced */
 	__BLK_TA_REMAP,			/* bio was remapped */
 	__BLK_TA_ABORT,			/* request aborted */
 	__BLK_TA_DRV_DATA,		/* driver-specific binary data */
@@ -100,7 +101,7 @@ enum blktrace_notify {
 struct blk_io_trace {
 	__u32 magic;		/* MAGIC << 8 | version */
 	__u32 sequence;		/* event number */
-	__u64 time;		/* in microseconds */
+	__u64 time;		/* in nanoseconds */
 	__u64 sector;		/* disk offset */
 	__u32 bytes;		/* transfer length */
 	__u32 action;		/* what happened */
@@ -130,7 +131,7 @@ enum {
 #define BLKTRACE_BDEV_SIZE	32
 
 /*
- * User setup structure passed with BLKTRACESTART
+ * User setup structure passed with BLKTRACESETUP
  */
 struct blk_user_trace_setup {
 	char name[BLKTRACE_BDEV_SIZE];	/* output */

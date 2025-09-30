@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC64_LDC_H
 #define _SPARC64_LDC_H
 
@@ -12,7 +13,7 @@ void ldom_power_off(void);
  * or data becomes available on the receive side.
  *
  * For non-RAW links, if the LDC_EVENT_RESET event arrives the
- * driver should reset all of it's internal state and reinvoke
+ * driver should reset all of its internal state and reinvoke
  * ldc_connect() to try and bring the link up again.
  *
  * For RAW links, ldc_connect() is not used.  Instead the driver

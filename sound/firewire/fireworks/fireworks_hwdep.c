@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * fireworks_hwdep.c - a part of driver for Fireworks based devices
  *
  * Copyright (c) 2013-2014 Takashi Sakamoto
- *
- * Licensed under the terms of the GNU General Public License, version 2.
  */
 
 /*
@@ -35,6 +34,7 @@ hwdep_read_resp_buf(struct snd_efw *efw, char __user *buf, long remained,
 	type = SNDRV_FIREWIRE_EVENT_EFW_RESPONSE;
 	if (copy_to_user(buf, &type, sizeof(type)))
 		return -EFAULT;
+	count += sizeof(type);
 	remained -= sizeof(type);
 	buf += sizeof(type);
 
@@ -184,22 +184,22 @@ end:
 	return count;
 }
 
-static unsigned int
+static __poll_t
 hwdep_poll(struct snd_hwdep *hwdep, struct file *file, poll_table *wait)
 {
 	struct snd_efw *efw = hwdep->private_data;
-	unsigned int events;
+	__poll_t events;
 
 	poll_wait(file, &efw->hwdep_wait, wait);
 
 	spin_lock_irq(&efw->lock);
 	if (efw->dev_lock_changed || efw->pull_ptr != efw->push_ptr)
-		events = POLLIN | POLLRDNORM;
+		events = EPOLLIN | EPOLLRDNORM;
 	else
 		events = 0;
 	spin_unlock_irq(&efw->lock);
 
-	return events | POLLOUT;
+	return events | EPOLLOUT;
 }
 
 static int
@@ -213,7 +213,7 @@ hwdep_get_info(struct snd_efw *efw, void __user *arg)
 	info.card = dev->card->index;
 	*(__be32 *)&info.guid[0] = cpu_to_be32(dev->config_rom[3]);
 	*(__be32 *)&info.guid[4] = cpu_to_be32(dev->config_rom[4]);
-	strlcpy(info.device_name, dev_name(&dev->device),
+	strscpy(info.device_name, dev_name(&dev->device),
 		sizeof(info.device_name));
 
 	if (copy_to_user(arg, &info, sizeof(info)))
@@ -319,7 +319,7 @@ int snd_efw_create_hwdep_device(struct snd_efw *efw)
 	err = snd_hwdep_new(efw->card, "Fireworks", 0, &hwdep);
 	if (err < 0)
 		goto end;
-	strcpy(hwdep->name, "Fireworks");
+	strscpy(hwdep->name, "Fireworks");
 	hwdep->iface = SNDRV_HWDEP_IFACE_FW_FIREWORKS;
 	hwdep->ops = ops;
 	hwdep->private_data = efw;

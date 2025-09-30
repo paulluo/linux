@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * (C) 2001 Clemson University and The University of Chicago
  *
@@ -21,7 +22,7 @@ int op_cache_initialize(void)
 	op_cache = kmem_cache_create("orangefs_op_cache",
 				     sizeof(struct orangefs_kernel_op_s),
 				     0,
-				     ORANGEFS_CACHE_CREATE_FLAGS,
+				     0,
 				     NULL);
 
 	if (!op_cache) {

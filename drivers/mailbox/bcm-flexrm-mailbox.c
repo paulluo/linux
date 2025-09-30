@@ -1,10 +1,8 @@
-/* Broadcom FlexRM Mailbox Driver
- *
- * Copyright (C) 2017 Broadcom
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2017 Broadcom
+
+/*
+ * Broadcom FlexRM Mailbox Driver
  *
  * Each Broadcom FlexSparx4 offload engine is implemented as an
  * extension to Broadcom FlexRM ring manager. The FlexRM ring
@@ -288,8 +286,6 @@ struct flexrm_mbox {
 	struct dma_pool *bd_pool;
 	struct dma_pool *cmpl_pool;
 	struct dentry *root;
-	struct dentry *config;
-	struct dentry *stats;
 	struct mbox_controller controller;
 };
 
@@ -367,7 +363,7 @@ static u32 flexrm_estimate_header_desc_count(u32 nhcnt)
 	return hcnt;
 }
 
-static void flexrm_flip_header_toogle(void *desc_ptr)
+static void flexrm_flip_header_toggle(void *desc_ptr)
 {
 	u64 desc = flexrm_read_desc(desc_ptr);
 
@@ -417,7 +413,7 @@ static void flexrm_enqueue_desc(u32 nhpos, u32 nhcnt, u32 reqid,
 	 *
 	 * In general use, number of non-HEADER descriptors can easily go
 	 * beyond 31. To tackle this situation, we have packet (or request)
-	 * extenstion bits (STARTPKT and ENDPKT) in the HEADER descriptor.
+	 * extension bits (STARTPKT and ENDPKT) in the HEADER descriptor.
 	 *
 	 * To use packet extension, the first HEADER descriptor of request
 	 * (or packet) will have STARTPKT=1 and ENDPKT=0. The intermediate
@@ -626,15 +622,15 @@ static int flexrm_spu_dma_map(struct device *dev, struct brcm_message *msg)
 
 	rc = dma_map_sg(dev, msg->spu.src, sg_nents(msg->spu.src),
 			DMA_TO_DEVICE);
-	if (rc < 0)
-		return rc;
+	if (!rc)
+		return -EIO;
 
 	rc = dma_map_sg(dev, msg->spu.dst, sg_nents(msg->spu.dst),
 			DMA_FROM_DEVICE);
-	if (rc < 0) {
+	if (!rc) {
 		dma_unmap_sg(dev, msg->spu.src, sg_nents(msg->spu.src),
 			     DMA_TO_DEVICE);
-		return rc;
+		return -EIO;
 	}
 
 	return 0;
@@ -701,7 +697,7 @@ static void *flexrm_spu_write_descs(struct brcm_message *msg, u32 nhcnt,
 	wmb();
 
 	/* Flip toggle bit in header */
-	flexrm_flip_header_toogle(orig_desc_ptr);
+	flexrm_flip_header_toggle(orig_desc_ptr);
 
 	return desc_ptr;
 }
@@ -830,7 +826,7 @@ static void *flexrm_sba_write_descs(struct brcm_message *msg, u32 nhcnt,
 	wmb();
 
 	/* Flip toggle bit in header */
-	flexrm_flip_header_toogle(orig_desc_ptr);
+	flexrm_flip_header_toggle(orig_desc_ptr);
 
 	return desc_ptr;
 }
@@ -1089,7 +1085,7 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 	/*
 	 * Get current completion read and write offset
 	 *
-	 * Note: We should read completion write pointer atleast once
+	 * Note: We should read completion write pointer at least once
 	 * after we get a MSI interrupt because HW maintains internal
 	 * MSI status which will allow next MSI interrupt only after
 	 * completion write pointer is read.
@@ -1116,8 +1112,8 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 		err = flexrm_cmpl_desc_to_error(desc);
 		if (err < 0) {
 			dev_warn(ring->mbox->dev,
-				 "got completion desc=0x%lx with error %d",
-				 (unsigned long)desc, err);
+			"ring%d got completion desc=0x%lx with error %d\n",
+			ring->num, (unsigned long)desc, err);
 		}
 
 		/* Determine request id from completion descriptor */
@@ -1127,8 +1123,8 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 		msg = ring->requests[reqid];
 		if (!msg) {
 			dev_warn(ring->mbox->dev,
-				 "null msg pointer for completion desc=0x%lx",
-				 (unsigned long)desc);
+			"ring%d null msg pointer for completion desc=0x%lx\n",
+			ring->num, (unsigned long)desc);
 			continue;
 		}
 
@@ -1157,8 +1153,7 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 
 static int flexrm_debugfs_conf_show(struct seq_file *file, void *offset)
 {
-	struct platform_device *pdev = to_platform_device(file->private);
-	struct flexrm_mbox *mbox = platform_get_drvdata(pdev);
+	struct flexrm_mbox *mbox = dev_get_drvdata(file->private);
 
 	/* Write config in file */
 	flexrm_write_config_in_seqfile(mbox, file);
@@ -1168,8 +1163,7 @@ static int flexrm_debugfs_conf_show(struct seq_file *file, void *offset)
 
 static int flexrm_debugfs_stats_show(struct seq_file *file, void *offset)
 {
-	struct platform_device *pdev = to_platform_device(file->private);
-	struct flexrm_mbox *mbox = platform_get_drvdata(pdev);
+	struct flexrm_mbox *mbox = dev_get_drvdata(file->private);
 
 	/* Write stats in file */
 	flexrm_write_stats_in_seqfile(mbox, file);
@@ -1238,7 +1232,9 @@ static int flexrm_startup(struct mbox_chan *chan)
 	ring->bd_base = dma_pool_alloc(ring->mbox->bd_pool,
 				       GFP_KERNEL, &ring->bd_dma_base);
 	if (!ring->bd_base) {
-		dev_err(ring->mbox->dev, "can't allocate BD memory\n");
+		dev_err(ring->mbox->dev,
+			"can't allocate BD memory for ring%d\n",
+			ring->num);
 		ret = -ENOMEM;
 		goto fail;
 	}
@@ -1258,18 +1254,20 @@ static int flexrm_startup(struct mbox_chan *chan)
 	}
 
 	/* Allocate completion memory */
-	ring->cmpl_base = dma_pool_alloc(ring->mbox->cmpl_pool,
+	ring->cmpl_base = dma_pool_zalloc(ring->mbox->cmpl_pool,
 					 GFP_KERNEL, &ring->cmpl_dma_base);
 	if (!ring->cmpl_base) {
-		dev_err(ring->mbox->dev, "can't allocate completion memory\n");
+		dev_err(ring->mbox->dev,
+			"can't allocate completion memory for ring%d\n",
+			ring->num);
 		ret = -ENOMEM;
 		goto fail_free_bd_memory;
 	}
-	memset(ring->cmpl_base, 0, RING_CMPL_SIZE);
 
 	/* Request IRQ */
 	if (ring->irq == UINT_MAX) {
-		dev_err(ring->mbox->dev, "ring IRQ not available\n");
+		dev_err(ring->mbox->dev,
+			"ring%d IRQ not available\n", ring->num);
 		ret = -ENODEV;
 		goto fail_free_cmpl_memory;
 	}
@@ -1278,7 +1276,8 @@ static int flexrm_startup(struct mbox_chan *chan)
 				   flexrm_irq_thread,
 				   0, dev_name(ring->mbox->dev), ring);
 	if (ret) {
-		dev_err(ring->mbox->dev, "failed to request ring IRQ\n");
+		dev_err(ring->mbox->dev,
+			"failed to request ring%d IRQ\n", ring->num);
 		goto fail_free_cmpl_memory;
 	}
 	ring->irq_requested = true;
@@ -1289,9 +1288,11 @@ static int flexrm_startup(struct mbox_chan *chan)
 	val = (num_online_cpus() < val) ? val / num_online_cpus() : 1;
 	cpumask_set_cpu((ring->num / val) % num_online_cpus(),
 			&ring->irq_aff_hint);
-	ret = irq_set_affinity_hint(ring->irq, &ring->irq_aff_hint);
+	ret = irq_update_affinity_hint(ring->irq, &ring->irq_aff_hint);
 	if (ret) {
-		dev_err(ring->mbox->dev, "failed to set IRQ affinity hint\n");
+		dev_err(ring->mbox->dev,
+			"failed to set IRQ affinity hint for ring%d\n",
+			ring->num);
 		goto fail_free_irq;
 	}
 
@@ -1365,8 +1366,8 @@ static void flexrm_shutdown(struct mbox_chan *chan)
 	/* Disable/inactivate ring */
 	writel_relaxed(0x0, ring->regs + RING_CONTROL);
 
-	/* Flush ring with timeout of 1s */
-	timeout = 1000;
+	/* Set ring flush state */
+	timeout = 1000; /* timeout of 1s */
 	writel_relaxed(BIT(CONTROL_FLUSH_SHIFT),
 			ring->regs + RING_CONTROL);
 	do {
@@ -1374,7 +1375,23 @@ static void flexrm_shutdown(struct mbox_chan *chan)
 		    FLUSH_DONE_MASK)
 			break;
 		mdelay(1);
-	} while (timeout--);
+	} while (--timeout);
+	if (!timeout)
+		dev_err(ring->mbox->dev,
+			"setting ring%d flush state timedout\n", ring->num);
+
+	/* Clear ring flush state */
+	timeout = 1000; /* timeout of 1s */
+	writel_relaxed(0x0, ring->regs + RING_CONTROL);
+	do {
+		if (!(readl_relaxed(ring->regs + RING_FLUSH_DONE) &
+		      FLUSH_DONE_MASK))
+			break;
+		mdelay(1);
+	} while (--timeout);
+	if (!timeout)
+		dev_err(ring->mbox->dev,
+			"clearing ring%d flush state timedout\n", ring->num);
 
 	/* Abort all in-flight requests */
 	for (reqid = 0; reqid < RING_MAX_REQ_COUNT; reqid++) {
@@ -1398,7 +1415,7 @@ static void flexrm_shutdown(struct mbox_chan *chan)
 
 	/* Release IRQ */
 	if (ring->irq_requested) {
-		irq_set_affinity_hint(ring->irq, NULL);
+		irq_update_affinity_hint(ring->irq, NULL);
 		free_irq(ring->irq, ring);
 		ring->irq_requested = false;
 	}
@@ -1457,7 +1474,7 @@ static void flexrm_mbox_msi_write(struct msi_desc *desc, struct msi_msg *msg)
 {
 	struct device *dev = msi_desc_to_dev(desc);
 	struct flexrm_mbox *mbox = dev_get_drvdata(dev);
-	struct flexrm_ring *ring = &mbox->rings[desc->platform.msi_index];
+	struct flexrm_ring *ring = &mbox->rings[desc->msi_index];
 
 	/* Configure per-Ring MSI registers */
 	writel_relaxed(msg->address_lo, ring->regs + RING_MSI_ADDR_LS);
@@ -1470,7 +1487,6 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 	int index, ret = 0;
 	void __iomem *regs;
 	void __iomem *regs_end;
-	struct msi_desc *desc;
 	struct resource *iomem;
 	struct flexrm_ring *ring;
 	struct flexrm_mbox *mbox;
@@ -1485,18 +1501,13 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 	mbox->dev = dev;
 	platform_set_drvdata(pdev, mbox);
 
-	/* Get resource for registers */
-	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	/* Get resource for registers and map registers of all rings */
+	mbox->regs = devm_platform_get_and_ioremap_resource(pdev, 0, &iomem);
 	if (!iomem || (resource_size(iomem) < RING_REGS_SIZE)) {
 		ret = -ENODEV;
 		goto fail;
-	}
-
-	/* Map registers of all rings */
-	mbox->regs = devm_ioremap_resource(&pdev->dev, iomem);
-	if (IS_ERR(mbox->regs)) {
+	} else if (IS_ERR(mbox->regs)) {
 		ret = PTR_ERR(mbox->regs);
-		dev_err(&pdev->dev, "Failed to remap mailbox regs: %d\n", ret);
 		goto fail;
 	}
 	regs_end = mbox->regs + resource_size(iomem);
@@ -1576,16 +1587,14 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 	}
 
 	/* Allocate platform MSIs for each ring */
-	ret = platform_msi_domain_alloc_irqs(dev, mbox->num_rings,
-						flexrm_mbox_msi_write);
+	ret = platform_device_msi_init_and_alloc_irqs(dev, mbox->num_rings,
+						      flexrm_mbox_msi_write);
 	if (ret)
 		goto fail_destroy_cmpl_pool;
 
 	/* Save alloced IRQ numbers for each ring */
-	for_each_msi_entry(desc, dev) {
-		ring = &mbox->rings[desc->platform.msi_index];
-		ring->irq = desc->irq;
-	}
+	for (index = 0; index < mbox->num_rings; index++)
+		mbox->rings[index].irq = msi_get_virq(dev, index);
 
 	/* Check availability of debugfs */
 	if (!debugfs_initialized())
@@ -1593,28 +1602,15 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 
 	/* Create debugfs root entry */
 	mbox->root = debugfs_create_dir(dev_name(mbox->dev), NULL);
-	if (IS_ERR_OR_NULL(mbox->root)) {
-		ret = PTR_ERR_OR_ZERO(mbox->root);
-		goto fail_free_msis;
-	}
 
 	/* Create debugfs config entry */
-	mbox->config = debugfs_create_devm_seqfile(mbox->dev,
-						   "config", mbox->root,
-						   flexrm_debugfs_conf_show);
-	if (IS_ERR_OR_NULL(mbox->config)) {
-		ret = PTR_ERR_OR_ZERO(mbox->config);
-		goto fail_free_debugfs_root;
-	}
+	debugfs_create_devm_seqfile(mbox->dev, "config", mbox->root,
+				    flexrm_debugfs_conf_show);
 
 	/* Create debugfs stats entry */
-	mbox->stats = debugfs_create_devm_seqfile(mbox->dev,
-						  "stats", mbox->root,
-						  flexrm_debugfs_stats_show);
-	if (IS_ERR_OR_NULL(mbox->stats)) {
-		ret = PTR_ERR_OR_ZERO(mbox->stats);
-		goto fail_free_debugfs_root;
-	}
+	debugfs_create_devm_seqfile(mbox->dev, "stats", mbox->root,
+				    flexrm_debugfs_stats_show);
+
 skip_debugfs:
 
 	/* Initialize mailbox controller */
@@ -1634,7 +1630,7 @@ skip_debugfs:
 		mbox->controller.chans[index].con_priv = &mbox->rings[index];
 
 	/* Register mailbox controller */
-	ret = mbox_controller_register(&mbox->controller);
+	ret = devm_mbox_controller_register(dev, &mbox->controller);
 	if (ret)
 		goto fail_free_debugfs_root;
 
@@ -1645,8 +1641,7 @@ skip_debugfs:
 
 fail_free_debugfs_root:
 	debugfs_remove_recursive(mbox->root);
-fail_free_msis:
-	platform_msi_domain_free_irqs(dev);
+	platform_device_msi_free_irqs_all(dev);
 fail_destroy_cmpl_pool:
 	dma_pool_destroy(mbox->cmpl_pool);
 fail_destroy_bd_pool:
@@ -1655,21 +1650,17 @@ fail:
 	return ret;
 }
 
-static int flexrm_mbox_remove(struct platform_device *pdev)
+static void flexrm_mbox_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct flexrm_mbox *mbox = platform_get_drvdata(pdev);
 
-	mbox_controller_unregister(&mbox->controller);
-
 	debugfs_remove_recursive(mbox->root);
 
-	platform_msi_domain_free_irqs(dev);
+	platform_device_msi_free_irqs_all(dev);
 
 	dma_pool_destroy(mbox->cmpl_pool);
 	dma_pool_destroy(mbox->bd_pool);
-
-	return 0;
 }
 
 static const struct of_device_id flexrm_mbox_of_match[] = {

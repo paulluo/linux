@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: extrace - Support for interpreter execution tracing
  *
+ * Copyright (C) 2000 - 2025, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -170,14 +136,65 @@ acpi_ex_trace_point(acpi_trace_event_type type,
 
 	if (pathname) {
 		ACPI_DEBUG_PRINT((ACPI_DB_TRACE_POINT,
-				  "%s %s [0x%p:%s] execution.\n",
+				  "%s %s [%s] execution.\n",
 				  acpi_ex_get_trace_event_name(type),
-				  begin ? "Begin" : "End", aml, pathname));
+				  begin ? "Begin" : "End", pathname));
 	} else {
 		ACPI_DEBUG_PRINT((ACPI_DB_TRACE_POINT,
 				  "%s %s [0x%p] execution.\n",
 				  acpi_ex_get_trace_event_name(type),
 				  begin ? "Begin" : "End", aml));
+	}
+}
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ex_trace_args
+ *
+ * PARAMETERS:  params            - AML method arguments
+ *              count             - numer of method arguments
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Trace any arguments
+ *
+ ******************************************************************************/
+
+void
+acpi_ex_trace_args(union acpi_operand_object **params, u32 count)
+{
+	u32 i;
+
+	ACPI_FUNCTION_NAME(ex_trace_args);
+
+	for (i = 0; i < count; i++) {
+		union acpi_operand_object *obj_desc = params[i];
+
+		if (!i) {
+			ACPI_DEBUG_PRINT((ACPI_DB_TRACE_POINT, " "));
+		}
+
+		switch (obj_desc->common.type) {
+		case ACPI_TYPE_INTEGER:
+			ACPI_DEBUG_PRINT_RAW((ACPI_DB_TRACE_POINT, "%llx", obj_desc->integer.value));
+			break;
+		case ACPI_TYPE_STRING:
+			if (!obj_desc->string.length) {
+				ACPI_DEBUG_PRINT_RAW((ACPI_DB_TRACE_POINT, "NULL"));
+				continue;
+			}
+			if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_TRACE_POINT, _COMPONENT))
+				acpi_ut_print_string(obj_desc->string.pointer, ACPI_UINT8_MAX);
+			break;
+		default:
+			ACPI_DEBUG_PRINT_RAW((ACPI_DB_TRACE_POINT, "Unknown"));
+			break;
+		}
+		if (i+1 == count) {
+			ACPI_DEBUG_PRINT_RAW((ACPI_DB_TRACE_POINT, "\n"));
+		} else {
+			ACPI_DEBUG_PRINT_RAW((ACPI_DB_TRACE_POINT, ", "));
+		}
 	}
 }
 

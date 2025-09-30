@@ -1,34 +1,16 @@
-/******************************************************************************
- *
- * Copyright(c) 2009-2012  Realtek Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- * wlanfae <wlanfae@realtek.com>
- * Realtek Corporation, No. 2, Innovation Road II, Hsinchu Science Park,
- * Hsinchu 300, Taiwan.
- *
- * Larry Finger <Larry.Finger@lwfinger.net>
- *
- *****************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2009-2012  Realtek Corporation.*/
 
 #include "../wifi.h"
 #include "../core.h"
 #include "../pci.h"
 #include "../base.h"
-#include "reg.h"
-#include "def.h"
+#include "../rtl8192d/reg.h"
+#include "../rtl8192d/def.h"
+#include "../rtl8192d/dm_common.h"
+#include "../rtl8192d/hw_common.h"
+#include "../rtl8192d/phy_common.h"
+#include "../rtl8192d/trx_common.h"
 #include "phy.h"
 #include "dm.h"
 #include "hw.h"
@@ -40,10 +22,8 @@
 
 static void rtl92d_init_aspm_vars(struct ieee80211_hw *hw)
 {
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-
-	/*close ASPM for AMD defaultly */
-	rtlpci->const_amdpci_aspm = 0;
 
 	/*
 	 * ASPM PS mode.
@@ -52,7 +32,7 @@ static void rtl92d_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 2 - Enable ASPM with Clock Req,
 	 * 3 - Alwyas Enable ASPM with Clock Req,
 	 * 4 - Always Enable ASPM without Clock Req.
-	 * set defult to RTL8192CE:3 RTL8192E:2
+	 * set default to RTL8192CE:3 RTL8192E:2
 	 * */
 	rtlpci->const_pci_aspm = 3;
 
@@ -79,7 +59,7 @@ static void rtl92d_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 1 - Support ASPM,
 	 * 2 - According to chipset.
 	 */
-	rtlpci->const_support_pciaspm = 1;
+	rtlpci->const_support_pciaspm = rtlpriv->cfg->mod_params->aspm_support;
 }
 
 static int rtl92d_init_sw_vars(struct ieee80211_hw *hw)
@@ -204,10 +184,10 @@ static void rtl92d_deinit_sw_vars(struct ieee80211_hw *hw)
 		skb_queue_purge(&rtlpriv->mac80211.skb_waitq[tid]);
 }
 
-static struct rtl_hal_ops rtl8192de_hal_ops = {
+static const struct rtl_hal_ops rtl8192de_hal_ops = {
 	.init_sw_vars = rtl92d_init_sw_vars,
 	.deinit_sw_vars = rtl92d_deinit_sw_vars,
-	.read_eeprom_info = rtl92de_read_eeprom_info,
+	.read_eeprom_info = rtl92d_read_eeprom_info,
 	.interrupt_recognized = rtl92de_interrupt_recognized,
 	.hw_init = rtl92de_hw_init,
 	.hw_disable = rtl92de_card_disable,
@@ -217,36 +197,38 @@ static struct rtl_hal_ops rtl8192de_hal_ops = {
 	.disable_interrupt = rtl92de_disable_interrupt,
 	.set_network_type = rtl92de_set_network_type,
 	.set_chk_bssid = rtl92de_set_check_bssid,
-	.set_qos = rtl92de_set_qos,
+	.set_qos = rtl92d_set_qos,
 	.set_bcn_reg = rtl92de_set_beacon_related_registers,
 	.set_bcn_intv = rtl92de_set_beacon_interval,
 	.update_interrupt_mask = rtl92de_update_interrupt_mask,
 	.get_hw_reg = rtl92de_get_hw_reg,
 	.set_hw_reg = rtl92de_set_hw_reg,
-	.update_rate_tbl = rtl92de_update_hal_rate_tbl,
+	.update_rate_tbl = rtl92d_update_hal_rate_tbl,
 	.fill_tx_desc = rtl92de_tx_fill_desc,
 	.fill_tx_cmddesc = rtl92de_tx_fill_cmddesc,
-	.query_rx_desc = rtl92de_rx_query_desc,
-	.set_channel_access = rtl92de_update_channel_access_setting,
-	.radio_onoff_checking = rtl92de_gpio_radio_on_off_checking,
+	.query_rx_desc = rtl92d_rx_query_desc,
+	.set_channel_access = rtl92d_update_channel_access_setting,
+	.radio_onoff_checking = rtl92d_gpio_radio_on_off_checking,
 	.set_bw_mode = rtl92d_phy_set_bw_mode,
 	.switch_channel = rtl92d_phy_sw_chnl,
-	.dm_watchdog = rtl92d_dm_watchdog,
+	.dm_watchdog = rtl92de_dm_watchdog,
 	.scan_operation_backup = rtl_phy_scan_operation_backup,
 	.set_rf_power_state = rtl92d_phy_set_rf_power_state,
 	.led_control = rtl92de_led_control,
-	.set_desc = rtl92de_set_desc,
-	.get_desc = rtl92de_get_desc,
+	.set_desc = rtl92d_set_desc,
+	.get_desc = rtl92d_get_desc,
+	.is_tx_desc_closed = rtl92de_is_tx_desc_closed,
 	.tx_polling = rtl92de_tx_polling,
-	.enable_hw_sec = rtl92de_enable_hw_security_config,
-	.set_key = rtl92de_set_key,
-	.init_sw_leds = rtl92de_init_sw_leds,
+	.enable_hw_sec = rtl92d_enable_hw_security_config,
+	.set_key = rtl92d_set_key,
 	.get_bbreg = rtl92d_phy_query_bb_reg,
 	.set_bbreg = rtl92d_phy_set_bb_reg,
 	.get_rfreg = rtl92d_phy_query_rf_reg,
 	.set_rfreg = rtl92d_phy_set_rf_reg,
 	.linked_set_reg = rtl92d_linked_set_reg,
 	.get_btc_status = rtl_btc_status_false,
+	.phy_iq_calibrate = rtl92d_phy_iq_calibrate,
+	.phy_lc_calibrate = rtl92d_phy_lc_calibrate,
 };
 
 static struct rtl_mod_params rtl92de_mod_params = {
@@ -254,6 +236,7 @@ static struct rtl_mod_params rtl92de_mod_params = {
 	.inactiveps = true,
 	.swctrl_lps = true,
 	.fwctrl_lps = false,
+	.aspm_support = 1,
 	.debug_level = 0,
 	.debug_mask = 0,
 };
@@ -369,11 +352,13 @@ module_param_named(debug_level, rtl92de_mod_params.debug_level, int, 0644);
 module_param_named(ips, rtl92de_mod_params.inactiveps, bool, 0444);
 module_param_named(swlps, rtl92de_mod_params.swctrl_lps, bool, 0444);
 module_param_named(fwlps, rtl92de_mod_params.fwctrl_lps, bool, 0444);
+module_param_named(aspm, rtl92de_mod_params.aspm_support, int, 0444);
 module_param_named(debug_mask, rtl92de_mod_params.debug_mask, ullong, 0644);
 MODULE_PARM_DESC(swenc, "Set to 1 for software crypto (default 0)\n");
 MODULE_PARM_DESC(ips, "Set to 0 to not use link power save (default 1)\n");
 MODULE_PARM_DESC(swlps, "Set to 1 to use SW control power save (default 1)\n");
 MODULE_PARM_DESC(fwlps, "Set to 1 to use FW control power save (default 0)\n");
+MODULE_PARM_DESC(aspm, "Set to 1 to enable ASPM (default 1)\n");
 MODULE_PARM_DESC(debug_level, "Set debug level (0-5) (default 0)");
 MODULE_PARM_DESC(debug_mask, "Set debug mask (default 0)");
 
@@ -389,17 +374,13 @@ static struct pci_driver rtl92de_driver = {
 
 /* add global spin lock to solve the problem that
  * Dul mac register operation on the same time */
-spinlock_t globalmutex_power;
-spinlock_t globalmutex_for_fwdownload;
-spinlock_t globalmutex_for_power_and_efuse;
+DEFINE_SPINLOCK(globalmutex_power);
+DEFINE_SPINLOCK(globalmutex_for_fwdownload);
+DEFINE_SPINLOCK(globalmutex_for_power_and_efuse);
 
 static int __init rtl92de_module_init(void)
 {
 	int ret = 0;
-
-	spin_lock_init(&globalmutex_power);
-	spin_lock_init(&globalmutex_for_fwdownload);
-	spin_lock_init(&globalmutex_for_power_and_efuse);
 
 	ret = pci_register_driver(&rtl92de_driver);
 	if (ret)

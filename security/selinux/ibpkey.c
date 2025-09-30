@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Pkey table
  *
@@ -11,21 +12,10 @@
  * Paul Moore <paul@paul-moore.com>
  *   (see security/selinux/netif.c and security/selinux/netport.c for more
  *   information)
- *
  */
 
 /*
  * (c) Mellanox Technologies, 2016
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/types.h>
@@ -50,7 +40,6 @@ struct sel_ib_pkey {
 	struct rcu_head rcu;
 };
 
-static LIST_HEAD(sel_ib_pkey_list);
 static DEFINE_SPINLOCK(sel_ib_pkey_lock);
 static struct sel_ib_pkey_bkt sel_ib_pkey_hash[SEL_PKEY_HASH_SIZE];
 
@@ -115,7 +104,7 @@ static void sel_ib_pkey_insert(struct sel_ib_pkey *pkey)
 
 		tail = list_entry(
 			rcu_dereference_protected(
-				sel_ib_pkey_hash[idx].list.prev,
+				list_tail_rcu(&sel_ib_pkey_hash[idx].list),
 				lockdep_is_held(&sel_ib_pkey_lock)),
 			struct sel_ib_pkey, list);
 		list_del_rcu(&tail->list);
@@ -141,7 +130,7 @@ static int sel_ib_pkey_sid_slow(u64 subnet_prefix, u16 pkey_num, u32 *sid)
 {
 	int ret;
 	struct sel_ib_pkey *pkey;
-	struct sel_ib_pkey *new = NULL;
+	struct sel_ib_pkey *new;
 	unsigned long flags;
 
 	spin_lock_irqsave(&sel_ib_pkey_lock, flags);
@@ -152,16 +141,18 @@ static int sel_ib_pkey_sid_slow(u64 subnet_prefix, u16 pkey_num, u32 *sid)
 		return 0;
 	}
 
-	ret = security_ib_pkey_sid(subnet_prefix, pkey_num, sid);
+	ret = security_ib_pkey_sid(subnet_prefix, pkey_num,
+				   sid);
 	if (ret)
 		goto out;
 
-	/* If this memory allocation fails still return 0. The SID
-	 * is valid, it just won't be added to the cache.
-	 */
-	new = kzalloc(sizeof(*new), GFP_ATOMIC);
-	if (!new)
+	new = kmalloc(sizeof(*new), GFP_ATOMIC);
+	if (!new) {
+		/* If this memory allocation fails still return 0. The SID
+		 * is valid, it just won't be added to the cache.
+		 */
 		goto out;
+	}
 
 	new->psec.subnet_prefix = subnet_prefix;
 	new->psec.pkey = pkey_num;
@@ -192,7 +183,7 @@ int sel_ib_pkey_sid(u64 subnet_prefix, u16 pkey_num, u32 *sid)
 
 	rcu_read_lock();
 	pkey = sel_ib_pkey_find(subnet_prefix, pkey_num);
-	if (pkey) {
+	if (likely(pkey)) {
 		*sid = pkey->psec.sid;
 		rcu_read_unlock();
 		return 0;
@@ -231,7 +222,7 @@ static __init int sel_ib_pkey_init(void)
 {
 	int iter;
 
-	if (!selinux_enabled)
+	if (!selinux_enabled_boot)
 		return 0;
 
 	for (iter = 0; iter < SEL_PKEY_HASH_SIZE; iter++) {

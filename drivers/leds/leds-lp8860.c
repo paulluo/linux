@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI LP8860 4-Channel LED Driver
  *
  * Copyright (C) 2014 Texas Instruments
  *
  * Author: Dan Murphy <dmurphy@ti.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
  */
 
 #include <linux/i2c.h>
@@ -19,7 +15,6 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/slab.h>
 
@@ -86,36 +81,25 @@
 
 #define LP8860_CLEAR_FAULTS		0x01
 
-#define LP8860_DISP_LED_NAME		"display_cluster"
+#define LP8860_NAME			"lp8860"
 
 /**
- * struct lp8860_led -
- * @lock - Lock for reading/writing the device
- * @client - Pointer to the I2C client
- * @led_dev - led class device pointer
- * @regmap - Devices register map
- * @eeprom_regmap - EEPROM register map
- * @enable_gpio - VDDIO/EN gpio to enable communication interface
- * @regulator - LED supply regulator pointer
- * @label - LED label
-**/
+ * struct lp8860_led
+ * @lock: Lock for reading/writing the device
+ * @client: Pointer to the I2C client
+ * @led_dev: led class device pointer
+ * @regmap: Devices register map
+ * @eeprom_regmap: EEPROM register map
+ */
 struct lp8860_led {
 	struct mutex lock;
 	struct i2c_client *client;
 	struct led_classdev led_dev;
 	struct regmap *regmap;
 	struct regmap *eeprom_regmap;
-	struct gpio_desc *enable_gpio;
-	struct regulator *regulator;
-	const char *label;
 };
 
-struct lp8860_eeprom_reg {
-	uint8_t reg;
-	uint8_t value;
-};
-
-static struct lp8860_eeprom_reg lp8860_eeprom_disp_regs[] = {
+static const struct reg_sequence lp8860_eeprom_disp_regs[] = {
 	{ LP8860_EEPROM_REG_0, 0xed },
 	{ LP8860_EEPROM_REG_1, 0xdf },
 	{ LP8860_EEPROM_REG_2, 0xdc },
@@ -143,43 +127,29 @@ static struct lp8860_eeprom_reg lp8860_eeprom_disp_regs[] = {
 	{ LP8860_EEPROM_REG_24, 0x3E },
 };
 
-static int lp8860_unlock_eeprom(struct lp8860_led *led, int lock)
+static int lp8860_unlock_eeprom(struct lp8860_led *led)
 {
 	int ret;
 
-	mutex_lock(&led->lock);
+	guard(mutex)(&led->lock);
 
-	if (lock == LP8860_UNLOCK_EEPROM) {
-		ret = regmap_write(led->regmap,
-			LP8860_EEPROM_UNLOCK,
-			LP8860_EEPROM_CODE_1);
-		if (ret) {
-			dev_err(&led->client->dev, "EEPROM Unlock failed\n");
-			goto out;
-		}
-
-		ret = regmap_write(led->regmap,
-			LP8860_EEPROM_UNLOCK,
-			LP8860_EEPROM_CODE_2);
-		if (ret) {
-			dev_err(&led->client->dev, "EEPROM Unlock failed\n");
-			goto out;
-		}
-		ret = regmap_write(led->regmap,
-			LP8860_EEPROM_UNLOCK,
-			LP8860_EEPROM_CODE_3);
-		if (ret) {
-			dev_err(&led->client->dev, "EEPROM Unlock failed\n");
-			goto out;
-		}
-	} else {
-		ret = regmap_write(led->regmap,
-			LP8860_EEPROM_UNLOCK,
-			LP8860_LOCK_EEPROM);
+	ret = regmap_write(led->regmap, LP8860_EEPROM_UNLOCK, LP8860_EEPROM_CODE_1);
+	if (ret) {
+		dev_err(&led->client->dev, "EEPROM Unlock failed\n");
+		return ret;
 	}
 
-out:
-	mutex_unlock(&led->lock);
+	ret = regmap_write(led->regmap, LP8860_EEPROM_UNLOCK, LP8860_EEPROM_CODE_2);
+	if (ret) {
+		dev_err(&led->client->dev, "EEPROM Unlock failed\n");
+		return ret;
+	}
+	ret = regmap_write(led->regmap, LP8860_EEPROM_UNLOCK, LP8860_EEPROM_CODE_3);
+	if (ret) {
+		dev_err(&led->client->dev, "EEPROM Unlock failed\n");
+		return ret;
+	}
+
 	return ret;
 }
 
@@ -216,39 +186,35 @@ static int lp8860_brightness_set(struct led_classdev *led_cdev,
 	int disp_brightness = brt_val * 255;
 	int ret;
 
-	mutex_lock(&led->lock);
+	guard(mutex)(&led->lock);
 
 	ret = lp8860_fault_check(led);
 	if (ret) {
 		dev_err(&led->client->dev, "Cannot read/clear faults\n");
-		goto out;
+		return ret;
 	}
 
 	ret = regmap_write(led->regmap, LP8860_DISP_CL1_BRT_MSB,
 			(disp_brightness & 0xff00) >> 8);
 	if (ret) {
 		dev_err(&led->client->dev, "Cannot write CL1 MSB\n");
-		goto out;
+		return ret;
 	}
 
 	ret = regmap_write(led->regmap, LP8860_DISP_CL1_BRT_LSB,
 			disp_brightness & 0xff);
 	if (ret) {
 		dev_err(&led->client->dev, "Cannot write CL1 LSB\n");
-		goto out;
+		return ret;
 	}
-out:
-	mutex_unlock(&led->lock);
-	return ret;
+
+	return 0;
 }
 
 static int lp8860_init(struct lp8860_led *led)
 {
 	unsigned int read_buf;
-	int ret, i, reg_count;
-
-	if (led->enable_gpio)
-		gpiod_direction_output(led->enable_gpio, 1);
+	int ret, reg_count;
 
 	ret = lp8860_fault_check(led);
 	if (ret)
@@ -258,95 +224,42 @@ static int lp8860_init(struct lp8860_led *led)
 	if (ret)
 		goto out;
 
-	ret = lp8860_unlock_eeprom(led, LP8860_UNLOCK_EEPROM);
+	ret = lp8860_unlock_eeprom(led);
 	if (ret) {
 		dev_err(&led->client->dev, "Failed unlocking EEPROM\n");
 		goto out;
 	}
 
-	reg_count = ARRAY_SIZE(lp8860_eeprom_disp_regs) / sizeof(lp8860_eeprom_disp_regs[0]);
-	for (i = 0; i < reg_count; i++) {
-		ret = regmap_write(led->eeprom_regmap,
-				lp8860_eeprom_disp_regs[i].reg,
-				lp8860_eeprom_disp_regs[i].value);
-		if (ret) {
-			dev_err(&led->client->dev, "Failed writing EEPROM\n");
-			goto out;
-		}
+	reg_count = ARRAY_SIZE(lp8860_eeprom_disp_regs);
+	ret = regmap_multi_reg_write(led->eeprom_regmap, lp8860_eeprom_disp_regs, reg_count);
+	if (ret) {
+		dev_err(&led->client->dev, "Failed writing EEPROM\n");
+		goto out;
 	}
 
-	ret = lp8860_unlock_eeprom(led, LP8860_LOCK_EEPROM);
+	ret = regmap_write(led->regmap, LP8860_EEPROM_UNLOCK, LP8860_LOCK_EEPROM);
 	if (ret)
 		goto out;
 
 	ret = regmap_write(led->regmap,
 			LP8860_EEPROM_CNTRL,
 			LP8860_PROGRAM_EEPROM);
-	if (ret)
+	if (ret) {
 		dev_err(&led->client->dev, "Failed programming EEPROM\n");
+		goto out;
+	}
+
+	return ret;
+
 out:
-	if (ret)
-		if (led->enable_gpio)
-			gpiod_direction_output(led->enable_gpio, 0);
 	return ret;
 }
-
-static const struct reg_default lp8860_reg_defs[] = {
-	{ LP8860_DISP_CL1_BRT_MSB, 0x00},
-	{ LP8860_DISP_CL1_BRT_LSB, 0x00},
-	{ LP8860_DISP_CL1_CURR_MSB, 0x00},
-	{ LP8860_DISP_CL1_CURR_LSB, 0x00},
-	{ LP8860_CL2_BRT_MSB, 0x00},
-	{ LP8860_CL2_BRT_LSB, 0x00},
-	{ LP8860_CL2_CURRENT, 0x00},
-	{ LP8860_CL3_BRT_MSB, 0x00},
-	{ LP8860_CL3_BRT_LSB, 0x00},
-	{ LP8860_CL3_CURRENT, 0x00},
-	{ LP8860_CL4_BRT_MSB, 0x00},
-	{ LP8860_CL4_BRT_LSB, 0x00},
-	{ LP8860_CL4_CURRENT, 0x00},
-	{ LP8860_CONFIG, 0x00},
-	{ LP8860_FAULT_CLEAR, 0x00},
-	{ LP8860_EEPROM_CNTRL, 0x80},
-	{ LP8860_EEPROM_UNLOCK, 0x00},
-};
 
 static const struct regmap_config lp8860_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 
 	.max_register = LP8860_EEPROM_UNLOCK,
-	.reg_defaults = lp8860_reg_defs,
-	.num_reg_defaults = ARRAY_SIZE(lp8860_reg_defs),
-	.cache_type = REGCACHE_NONE,
-};
-
-static const struct reg_default lp8860_eeprom_defs[] = {
-	{ LP8860_EEPROM_REG_0, 0x00 },
-	{ LP8860_EEPROM_REG_1, 0x00 },
-	{ LP8860_EEPROM_REG_2, 0x00 },
-	{ LP8860_EEPROM_REG_3, 0x00 },
-	{ LP8860_EEPROM_REG_4, 0x00 },
-	{ LP8860_EEPROM_REG_5, 0x00 },
-	{ LP8860_EEPROM_REG_6, 0x00 },
-	{ LP8860_EEPROM_REG_7, 0x00 },
-	{ LP8860_EEPROM_REG_8, 0x00 },
-	{ LP8860_EEPROM_REG_9, 0x00 },
-	{ LP8860_EEPROM_REG_10, 0x00 },
-	{ LP8860_EEPROM_REG_11, 0x00 },
-	{ LP8860_EEPROM_REG_12, 0x00 },
-	{ LP8860_EEPROM_REG_13, 0x00 },
-	{ LP8860_EEPROM_REG_14, 0x00 },
-	{ LP8860_EEPROM_REG_15, 0x00 },
-	{ LP8860_EEPROM_REG_16, 0x00 },
-	{ LP8860_EEPROM_REG_17, 0x00 },
-	{ LP8860_EEPROM_REG_18, 0x00 },
-	{ LP8860_EEPROM_REG_19, 0x00 },
-	{ LP8860_EEPROM_REG_20, 0x00 },
-	{ LP8860_EEPROM_REG_21, 0x00 },
-	{ LP8860_EEPROM_REG_22, 0x00 },
-	{ LP8860_EEPROM_REG_23, 0x00 },
-	{ LP8860_EEPROM_REG_24, 0x00 },
 };
 
 static const struct regmap_config lp8860_eeprom_regmap_config = {
@@ -354,52 +267,49 @@ static const struct regmap_config lp8860_eeprom_regmap_config = {
 	.val_bits = 8,
 
 	.max_register = LP8860_EEPROM_REG_24,
-	.reg_defaults = lp8860_eeprom_defs,
-	.num_reg_defaults = ARRAY_SIZE(lp8860_eeprom_defs),
-	.cache_type = REGCACHE_NONE,
 };
 
-static int lp8860_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static void lp8860_disable_gpio(void *data)
+{
+	struct gpio_desc *gpio = data;
+
+	gpiod_set_value(gpio, 0);
+}
+
+static int lp8860_probe(struct i2c_client *client)
 {
 	int ret;
 	struct lp8860_led *led;
-	struct device_node *np = client->dev.of_node;
+	struct device_node *np = dev_of_node(&client->dev);
+	struct device_node *child_node;
+	struct led_init_data init_data = {};
+	struct gpio_desc *enable_gpio;
 
 	led = devm_kzalloc(&client->dev, sizeof(*led), GFP_KERNEL);
 	if (!led)
 		return -ENOMEM;
 
-	led->label = LP8860_DISP_LED_NAME;
+	child_node = of_get_next_available_child(np, NULL);
+	if (!child_node)
+		return -EINVAL;
 
-	if (client->dev.of_node) {
-		ret = of_property_read_string(np, "label", &led->label);
-		if (ret) {
-			dev_err(&client->dev, "Missing label in dt\n");
-			return -EINVAL;
-		}
-	}
+	enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_LOW);
+	if (IS_ERR(enable_gpio))
+		return dev_err_probe(&client->dev, PTR_ERR(enable_gpio),
+				     "Failed to get enable GPIO\n");
+	devm_add_action_or_reset(&client->dev, lp8860_disable_gpio, enable_gpio);
 
-	led->enable_gpio = devm_gpiod_get_optional(&client->dev,
-						   "enable", GPIOD_OUT_LOW);
-	if (IS_ERR(led->enable_gpio)) {
-		ret = PTR_ERR(led->enable_gpio);
-		dev_err(&client->dev, "Failed to get enable gpio: %d\n", ret);
-		return ret;
-	}
-
-	led->regulator = devm_regulator_get(&client->dev, "vled");
-	if (IS_ERR(led->regulator))
-		led->regulator = NULL;
+	ret = devm_regulator_get_enable_optional(&client->dev, "vled");
+	if (ret && ret != -ENODEV)
+		return dev_err_probe(&client->dev, ret,
+				     "Failed to enable vled regulator\n");
 
 	led->client = client;
-	led->led_dev.name = led->label;
-	led->led_dev.max_brightness = LED_FULL;
 	led->led_dev.brightness_set_blocking = lp8860_brightness_set;
 
-	mutex_init(&led->lock);
-
-	i2c_set_clientdata(client, led);
+	ret = devm_mutex_init(&client->dev, &led->lock);
+	if (ret)
+		return dev_err_probe(&client->dev, ret, "Failed to initialize lock\n");
 
 	led->regmap = devm_regmap_init_i2c(client, &lp8860_regmap_config);
 	if (IS_ERR(led->regmap)) {
@@ -421,7 +331,12 @@ static int lp8860_probe(struct i2c_client *client,
 	if (ret)
 		return ret;
 
-	ret = led_classdev_register(&client->dev, &led->led_dev);
+	init_data.fwnode = of_fwnode_handle(child_node);
+	init_data.devicename = LP8860_NAME;
+	init_data.default_label = ":display_cluster";
+
+	ret = devm_led_classdev_register_ext(&client->dev, &led->led_dev,
+					     &init_data);
 	if (ret) {
 		dev_err(&client->dev, "led register err: %d\n", ret);
 		return ret;
@@ -430,51 +345,28 @@ static int lp8860_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int lp8860_remove(struct i2c_client *client)
-{
-	struct lp8860_led *led = i2c_get_clientdata(client);
-	int ret;
-
-	led_classdev_unregister(&led->led_dev);
-
-	if (led->enable_gpio)
-		gpiod_direction_output(led->enable_gpio, 0);
-
-	if (led->regulator) {
-		ret = regulator_disable(led->regulator);
-		if (ret)
-			dev_err(&led->client->dev,
-				"Failed to disable regulator\n");
-	}
-
-	return 0;
-}
-
 static const struct i2c_device_id lp8860_id[] = {
-	{ "lp8860", 0 },
+	{ "lp8860" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lp8860_id);
 
-#ifdef CONFIG_OF
 static const struct of_device_id of_lp8860_leds_match[] = {
 	{ .compatible = "ti,lp8860", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, of_lp8860_leds_match);
-#endif
 
 static struct i2c_driver lp8860_driver = {
 	.driver = {
 		.name	= "lp8860",
-		.of_match_table = of_match_ptr(of_lp8860_leds_match),
+		.of_match_table = of_lp8860_leds_match,
 	},
 	.probe		= lp8860_probe,
-	.remove		= lp8860_remove,
 	.id_table	= lp8860_id,
 };
 module_i2c_driver(lp8860_driver);
 
 MODULE_DESCRIPTION("Texas Instruments LP8860 LED driver");
 MODULE_AUTHOR("Dan Murphy <dmurphy@ti.com>");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

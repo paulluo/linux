@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* getdelays.c
  *
  * Utility to get per-pid and per-tgid delay accounting statistics
@@ -44,7 +45,6 @@
 		exit(code);			\
 	} while (0)
 
-int done;
 int rcvbufsz;
 char name[100];
 int dbg;
@@ -135,7 +135,7 @@ static int send_cmd(int sd, __u16 nlmsg_type, __u32 nlmsg_pid,
 	msg.g.version = 0x1;
 	na = (struct nlattr *) GENLMSG_DATA(&msg);
 	na->nla_type = nla_type;
-	na->nla_len = nla_len + 1 + NLA_HDRLEN;
+	na->nla_len = nla_len + NLA_HDRLEN;
 	memcpy(NLA_DATA(na), nla_data, nla_len);
 	msg.n.nlmsg_len += NLMSG_ALIGN(na->nla_len);
 
@@ -192,36 +192,110 @@ static int get_family_id(int sd)
 }
 
 #define average_ms(t, c) (t / 1000000ULL / (c ? c : 1))
+#define delay_ms(t) (t / 1000000ULL)
+
+/*
+ * Version compatibility note:
+ * Field availability depends on taskstats version (t->version),
+ * corresponding to TASKSTATS_VERSION in kernel headers
+ * see include/uapi/linux/taskstats.h
+ *
+ * Version feature mapping:
+ * version >= 11  - supports COMPACT statistics
+ * version >= 13  - supports WPCOPY statistics
+ * version >= 14  - supports IRQ statistics
+ * version >= 16  - supports *_max and *_min delay statistics
+ *
+ * Always verify version before accessing version-dependent fields
+ * to maintain backward compatibility.
+ */
+#define PRINT_CPU_DELAY(version, t) \
+	do { \
+		if (version >= 16) { \
+			printf("%-10s%15s%15s%15s%15s%15s%15s%15s\n", \
+				"CPU", "count", "real total", "virtual total", \
+				"delay total", "delay average", "delay max", "delay min"); \
+			printf("          %15llu%15llu%15llu%15llu%15.3fms%13.6fms%13.6fms\n", \
+				(unsigned long long)(t)->cpu_count, \
+				(unsigned long long)(t)->cpu_run_real_total, \
+				(unsigned long long)(t)->cpu_run_virtual_total, \
+				(unsigned long long)(t)->cpu_delay_total, \
+				average_ms((double)(t)->cpu_delay_total, (t)->cpu_count), \
+				delay_ms((double)(t)->cpu_delay_max), \
+				delay_ms((double)(t)->cpu_delay_min)); \
+		} else { \
+			printf("%-10s%15s%15s%15s%15s%15s\n", \
+				"CPU", "count", "real total", "virtual total", \
+				"delay total", "delay average"); \
+			printf("          %15llu%15llu%15llu%15llu%15.3fms\n", \
+				(unsigned long long)(t)->cpu_count, \
+				(unsigned long long)(t)->cpu_run_real_total, \
+				(unsigned long long)(t)->cpu_run_virtual_total, \
+				(unsigned long long)(t)->cpu_delay_total, \
+				average_ms((double)(t)->cpu_delay_total, (t)->cpu_count)); \
+		} \
+	} while (0)
+#define PRINT_FILED_DELAY(name, version, t, count, total, max, min) \
+	do { \
+		if (version >= 16) { \
+			printf("%-10s%15s%15s%15s%15s%15s\n", \
+				name, "count", "delay total", "delay average", \
+				"delay max", "delay min"); \
+			printf("          %15llu%15llu%15.3fms%13.6fms%13.6fms\n", \
+				(unsigned long long)(t)->count, \
+				(unsigned long long)(t)->total, \
+				average_ms((double)(t)->total, (t)->count), \
+				delay_ms((double)(t)->max), \
+				delay_ms((double)(t)->min)); \
+		} else { \
+			printf("%-10s%15s%15s%15s\n", \
+				name, "count", "delay total", "delay average"); \
+			printf("          %15llu%15llu%15.3fms\n", \
+				(unsigned long long)(t)->count, \
+				(unsigned long long)(t)->total, \
+				average_ms((double)(t)->total, (t)->count)); \
+		} \
+	} while (0)
 
 static void print_delayacct(struct taskstats *t)
 {
-	printf("\n\nCPU   %15s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15llu%15llu%15.3fms\n"
-	       "IO    %15s%15s%15s\n"
-	       "      %15llu%15llu%15llums\n"
-	       "SWAP  %15s%15s%15s\n"
-	       "      %15llu%15llu%15llums\n"
-	       "RECLAIM  %12s%15s%15s\n"
-	       "      %15llu%15llu%15llums\n",
-	       "count", "real total", "virtual total",
-	       "delay total", "delay average",
-	       (unsigned long long)t->cpu_count,
-	       (unsigned long long)t->cpu_run_real_total,
-	       (unsigned long long)t->cpu_run_virtual_total,
-	       (unsigned long long)t->cpu_delay_total,
-	       average_ms((double)t->cpu_delay_total, t->cpu_count),
-	       "count", "delay total", "delay average",
-	       (unsigned long long)t->blkio_count,
-	       (unsigned long long)t->blkio_delay_total,
-	       average_ms(t->blkio_delay_total, t->blkio_count),
-	       "count", "delay total", "delay average",
-	       (unsigned long long)t->swapin_count,
-	       (unsigned long long)t->swapin_delay_total,
-	       average_ms(t->swapin_delay_total, t->swapin_count),
-	       "count", "delay total", "delay average",
-	       (unsigned long long)t->freepages_count,
-	       (unsigned long long)t->freepages_delay_total,
-	       average_ms(t->freepages_delay_total, t->freepages_count));
+	printf("\n\n");
+
+	PRINT_CPU_DELAY(t->version, t);
+
+	PRINT_FILED_DELAY("IO", t->version, t,
+		blkio_count, blkio_delay_total,
+		blkio_delay_max, blkio_delay_min);
+
+	PRINT_FILED_DELAY("SWAP", t->version, t,
+		swapin_count, swapin_delay_total,
+		swapin_delay_max, swapin_delay_min);
+
+	PRINT_FILED_DELAY("RECLAIM", t->version, t,
+		freepages_count, freepages_delay_total,
+		freepages_delay_max, freepages_delay_min);
+
+	PRINT_FILED_DELAY("THRASHING", t->version, t,
+		thrashing_count, thrashing_delay_total,
+		thrashing_delay_max, thrashing_delay_min);
+
+	if (t->version >= 11) {
+		PRINT_FILED_DELAY("COMPACT", t->version, t,
+			compact_count, compact_delay_total,
+			compact_delay_max, compact_delay_min);
+	}
+
+	if (t->version >= 13) {
+		PRINT_FILED_DELAY("WPCOPY", t->version, t,
+			wpcopy_count, wpcopy_delay_total,
+			wpcopy_delay_max, wpcopy_delay_min);
+	}
+
+	if (t->version >= 14) {
+		PRINT_FILED_DELAY("IRQ", t->version, t,
+			irq_count, irq_delay_total,
+			irq_delay_max, irq_delay_min);
+	}
 }
 
 static void task_context_switch_counts(struct taskstats *t)
@@ -266,7 +340,6 @@ int main(int argc, char *argv[])
 	pid_t rtid = 0;
 
 	int fd = 0;
-	int count = 0;
 	int write_file = 0;
 	int maskset = 0;
 	char *logfile = NULL;
@@ -476,7 +549,6 @@ int main(int argc, char *argv[])
 				len2 = 0;
 				/* For nested attributes, na follows */
 				na = (struct nlattr *) NLA_DATA(na);
-				done = 0;
 				while (len2 < aggr_len) {
 					switch (na->nla_type) {
 					case TASKSTATS_TYPE_PID:
@@ -490,7 +562,6 @@ int main(int argc, char *argv[])
 							printf("TGID\t%d\n", rtid);
 						break;
 					case TASKSTATS_TYPE_STATS:
-						count++;
 						if (print_delays)
 							print_delayacct((struct taskstats *) NLA_DATA(na));
 						if (print_io_accounting)

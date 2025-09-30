@@ -1,16 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Greybus operations
  *
  * Copyright 2015-2016 Google Inc.
- *
- * Released under the GPLv2 only.
  */
 
 #include <linux/string.h>
 #include <linux/sysfs.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/rwlock.h>
+#include <linux/spinlock.h>
 #include <linux/idr.h>
 
 #include "audio_manager.h"
@@ -45,11 +44,14 @@ int gb_audio_manager_add(struct gb_audio_manager_module_descriptor *desc)
 	int id;
 	int err;
 
-	id = ida_simple_get(&module_id, 0, 0, GFP_KERNEL);
+	id = ida_alloc(&module_id, GFP_KERNEL);
+	if (id < 0)
+		return id;
+
 	err = gb_audio_manager_module_create(&module, manager_kset,
 					     id, desc);
 	if (err) {
-		ida_simple_remove(&module_id, id);
+		ida_free(&module_id, id);
 		return err;
 	}
 
@@ -76,7 +78,7 @@ int gb_audio_manager_remove(int id)
 	list_del(&module->list);
 	kobject_put(&module->kobj);
 	up_write(&modules_rwsem);
-	ida_simple_remove(&module_id, id);
+	ida_free(&module_id, id);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gb_audio_manager_remove);
@@ -84,14 +86,14 @@ EXPORT_SYMBOL_GPL(gb_audio_manager_remove);
 void gb_audio_manager_remove_all(void)
 {
 	struct gb_audio_manager_module *module, *next;
-	int is_empty = 1;
+	int is_empty;
 
 	down_write(&modules_rwsem);
 
 	list_for_each_entry_safe(module, next, &modules_list, list) {
 		list_del(&module->list);
+		ida_free(&module_id, module->id);
 		kobject_put(&module->kobj);
-		ida_simple_remove(&module_id, module->id);
 	}
 
 	is_empty = list_empty(&modules_list);
@@ -180,5 +182,6 @@ static void __exit manager_exit(void)
 module_init(manager_init);
 module_exit(manager_exit);
 
+MODULE_DESCRIPTION("Greybus audio operations manager");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Svetlin Ankov <ankov_svetlin@projectara.com>");

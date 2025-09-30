@@ -1,27 +1,5 @@
-/******************************************************************************
- *
- * Copyright(c) 2009-2014  Realtek Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- * wlanfae <wlanfae@realtek.com>
- * Realtek Corporation, No. 2, Innovation Road II, Hsinchu Science Park,
- * Hsinchu 300, Taiwan.
- *
- * Larry Finger <Larry.Finger@lwfinger.net>
- *
- *****************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2009-2014  Realtek Corporation.*/
 
 #include "../wifi.h"
 #include "../core.h"
@@ -31,7 +9,6 @@
 #include "phy.h"
 #include "dm.h"
 #include "hw.h"
-#include "sw.h"
 #include "fw.h"
 #include "trx.h"
 #include "led.h"
@@ -44,10 +21,8 @@
 
 static void rtl92ee_init_aspm_vars(struct ieee80211_hw *hw)
 {
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
-
-	/*close ASPM for AMD defaultly */
-	rtlpci->const_amdpci_aspm = 0;
 
 	/**
 	 * ASPM PS mode.
@@ -56,7 +31,7 @@ static void rtl92ee_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 2 - Enable ASPM with Clock Req,
 	 * 3 - Alwyas Enable ASPM with Clock Req,
 	 * 4 - Always Enable ASPM without Clock Req.
-	 * set defult to RTL8192CE:3 RTL8192E:2
+	 * set default to RTL8192CE:3 RTL8192E:2
 	 */
 	rtlpci->const_pci_aspm = 3;
 
@@ -83,10 +58,10 @@ static void rtl92ee_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 1 - Support ASPM,
 	 * 2 - According to chipset.
 	 */
-	rtlpci->const_support_pciaspm = 1;
+	rtlpci->const_support_pciaspm = rtlpriv->cfg->mod_params->aspm_support;
 }
 
-int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
+static int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
@@ -97,9 +72,9 @@ int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
 	rtlpci->msi_support = rtlpriv->cfg->mod_params->msi_support;
 	rtlpriv->btcoexist.btc_ops = rtl_btc_get_ops_pointer();
 
-	rtlpriv->dm.dm_initialgain_enable = 1;
+	rtlpriv->dm.dm_initialgain_enable = true;
 	rtlpriv->dm.dm_flag = 0;
-	rtlpriv->dm.disable_framebursting = 0;
+	rtlpriv->dm.disable_framebursting = false;
 	rtlpci->transmit_config = CFENDFORM | BIT(15);
 
 	/*just 2.4G band*/
@@ -185,7 +160,7 @@ int rtl92ee_init_sw_vars(struct ieee80211_hw *hw)
 	return 0;
 }
 
-void rtl92ee_deinit_sw_vars(struct ieee80211_hw *hw)
+static void rtl92ee_deinit_sw_vars(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 
@@ -196,12 +171,12 @@ void rtl92ee_deinit_sw_vars(struct ieee80211_hw *hw)
 }
 
 /* get bt coexist status */
-bool rtl92ee_get_btc_status(void)
+static bool rtl92ee_get_btc_status(void)
 {
 	return true;
 }
 
-static struct rtl_hal_ops rtl8192ee_hal_ops = {
+static const struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.init_sw_vars = rtl92ee_init_sw_vars,
 	.deinit_sw_vars = rtl92ee_deinit_sw_vars,
 	.read_eeprom_info = rtl92ee_read_eeprom_info,
@@ -221,7 +196,6 @@ static struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.get_hw_reg = rtl92ee_get_hw_reg,
 	.set_hw_reg = rtl92ee_set_hw_reg,
 	.update_rate_tbl = rtl92ee_update_hal_rate_tbl,
-	.pre_fill_tx_bd_desc = rtl92ee_pre_fill_tx_bd_desc,
 	.rx_desc_buff_remained_cnt = rtl92ee_rx_desc_buff_remained_cnt,
 	.rx_check_dma_ok = rtl92ee_rx_check_dma_ok,
 	.fill_tx_desc = rtl92ee_tx_fill_desc,
@@ -242,15 +216,13 @@ static struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.tx_polling = rtl92ee_tx_polling,
 	.enable_hw_sec = rtl92ee_enable_hw_security_config,
 	.set_key = rtl92ee_set_key,
-	.init_sw_leds = rtl92ee_init_sw_leds,
 	.get_bbreg = rtl92ee_phy_query_bb_reg,
 	.set_bbreg = rtl92ee_phy_set_bb_reg,
 	.get_rfreg = rtl92ee_phy_query_rf_reg,
 	.set_rfreg = rtl92ee_phy_set_rf_reg,
 	.fill_h2c_cmd = rtl92ee_fill_h2c_cmd,
 	.get_btc_status = rtl92ee_get_btc_status,
-	.rx_command_packet = rtl92ee_rx_command_packet,
-	.c2h_content_parsing = rtl92ee_c2h_content_parsing,
+	.c2h_ra_report_handler = rtl92ee_c2h_ra_report_handler,
 };
 
 static struct rtl_mod_params rtl92ee_mod_params = {
@@ -259,6 +231,8 @@ static struct rtl_mod_params rtl92ee_mod_params = {
 	.swctrl_lps = false,
 	.fwctrl_lps = true,
 	.msi_support = true,
+	.dma64 = false,
+	.aspm_support = 1,
 	.debug_level = 0,
 	.debug_mask = 0,
 };
@@ -376,6 +350,8 @@ module_param_named(ips, rtl92ee_mod_params.inactiveps, bool, 0444);
 module_param_named(swlps, rtl92ee_mod_params.swctrl_lps, bool, 0444);
 module_param_named(fwlps, rtl92ee_mod_params.fwctrl_lps, bool, 0444);
 module_param_named(msi, rtl92ee_mod_params.msi_support, bool, 0444);
+module_param_named(dma64, rtl92ee_mod_params.dma64, bool, 0444);
+module_param_named(aspm, rtl92ee_mod_params.aspm_support, int, 0444);
 module_param_named(disable_watchdog, rtl92ee_mod_params.disable_watchdog,
 		   bool, 0444);
 MODULE_PARM_DESC(swenc, "Set to 1 for software crypto (default 0)\n");
@@ -383,6 +359,8 @@ MODULE_PARM_DESC(ips, "Set to 0 to not use link power save (default 1)\n");
 MODULE_PARM_DESC(swlps, "Set to 1 to use SW control power save (default 0)\n");
 MODULE_PARM_DESC(fwlps, "Set to 1 to use FW control power save (default 1)\n");
 MODULE_PARM_DESC(msi, "Set to 1 to use MSI interrupts mode (default 1)\n");
+MODULE_PARM_DESC(dma64, "Set to 1 to use DMA 64 (default 0)\n");
+MODULE_PARM_DESC(aspm, "Set to 1 to enable ASPM (default 1)\n");
 MODULE_PARM_DESC(debug_level, "Set debug level (0-5) (default 0)");
 MODULE_PARM_DESC(debug_mask, "Set debug mask (default 0)");
 MODULE_PARM_DESC(disable_watchdog, "Set to 1 to disable the watchdog (default 0)\n");

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_MTD_QINFO_H
 #define __LINUX_MTD_QINFO_H
 
@@ -23,7 +24,7 @@ struct lpddr_private {
 	struct qinfo_chip *qinfo;
 	int numchips;
 	unsigned long chipshift;
-	struct flchip chips[0];
+	struct flchip chips[] __counted_by(numchips);
 };
 
 /* qinfo_query_info structure contains request information for

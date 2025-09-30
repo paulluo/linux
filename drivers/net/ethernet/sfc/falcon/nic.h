@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
  * Copyright 2006-2013 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
  */
 
 #ifndef EF4_NIC_H
@@ -83,7 +80,7 @@ static inline struct ef4_tx_queue *ef4_tx_queue_partner(struct ef4_tx_queue *tx_
 static inline bool __ef4_nic_tx_is_empty(struct ef4_tx_queue *tx_queue,
 					 unsigned int write_count)
 {
-	unsigned int empty_read_count = ACCESS_ONCE(tx_queue->empty_read_count);
+	unsigned int empty_read_count = READ_ONCE(tx_queue->empty_read_count);
 
 	if (empty_read_count == 0)
 		return false;
@@ -267,6 +264,7 @@ enum {
 /**
  * struct falcon_nic_data - Falcon NIC state
  * @pci_dev2: Secondary function of Falcon A
+ * @efx: ef4_nic pointer
  * @board: Board state and functions
  * @stats: Hardware statistics
  * @stats_disable_count: Nest count for disabling statistics fetches
@@ -280,6 +278,7 @@ enum {
  */
 struct falcon_nic_data {
 	struct pci_dev *pci_dev2;
+	struct ef4_nic *efx;
 	struct falcon_board board;
 	u64 stats[FALCON_STAT_COUNT];
 	unsigned int stats_disable_count;
@@ -298,7 +297,7 @@ static inline struct falcon_board *falcon_board(struct ef4_nic *efx)
 	return &data->board;
 }
 
-struct ethtool_ts_info;
+struct kernel_ethtool_ts_info;
 
 extern const struct ef4_nic_type falcon_a1_nic_type;
 extern const struct ef4_nic_type falcon_b0_nic_type;
@@ -464,11 +463,11 @@ irqreturn_t ef4_farch_fatal_interrupt(struct ef4_nic *efx);
 
 static inline int ef4_nic_event_test_irq_cpu(struct ef4_channel *channel)
 {
-	return ACCESS_ONCE(channel->event_test_cpu);
+	return READ_ONCE(channel->event_test_cpu);
 }
 static inline int ef4_nic_irq_test_irq_cpu(struct ef4_nic *efx)
 {
-	return ACCESS_ONCE(efx->last_irq_cpu);
+	return READ_ONCE(efx->last_irq_cpu);
 }
 
 /* Global Resources */
@@ -478,7 +477,6 @@ void ef4_farch_finish_flr(struct ef4_nic *efx);
 void falcon_start_nic_stats(struct ef4_nic *efx);
 void falcon_stop_nic_stats(struct ef4_nic *efx);
 int falcon_reset_xaui(struct ef4_nic *efx);
-void ef4_farch_dimension_resources(struct ef4_nic *efx, unsigned sram_lim_qw);
 void ef4_farch_init_common(struct ef4_nic *efx);
 void ef4_farch_rx_push_indir_table(struct ef4_nic *efx);
 
@@ -499,14 +497,10 @@ size_t ef4_nic_get_regs_len(struct ef4_nic *efx);
 void ef4_nic_get_regs(struct ef4_nic *efx, void *buf);
 
 size_t ef4_nic_describe_stats(const struct ef4_hw_stat_desc *desc, size_t count,
-			      const unsigned long *mask, u8 *names);
+			      const unsigned long *mask, u8 **names);
 void ef4_nic_update_stats(const struct ef4_hw_stat_desc *desc, size_t count,
 			  const unsigned long *mask, u64 *stats,
 			  const void *dma_buf, bool accumulate);
-void ef4_nic_fix_nodesc_drop_stat(struct ef4_nic *efx, u64 *stat);
-
-#define EF4_MAX_FLUSH_TIME 5000
-
 void ef4_farch_generate_event(struct ef4_nic *efx, unsigned int evq,
 			      ef4_qword_t *event);
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* arch/sparc64/mm/tsb.c
  *
  * Copyright (C) 2006, 2008 David S. Miller <davem@davemloft.net>
@@ -7,9 +8,9 @@
 #include <linux/preempt.h>
 #include <linux/slab.h>
 #include <linux/mm_types.h>
+#include <linux/pgtable.h>
 
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 #include <asm/setup.h>
 #include <asm/tsb.h>
@@ -265,7 +266,7 @@ static void setup_tsb_params(struct mm_struct *mm, unsigned long tsb_idx, unsign
 	default:
 		printk(KERN_ERR "TSB[%s:%d]: Impossible TSB size %lu, killing process.\n",
 		       current->comm, current->pid, tsb_bytes);
-		do_exit(SIGSEGV);
+		BUG();
 	}
 	tte |= pte_sz_bits(page_sz);
 
@@ -384,7 +385,7 @@ static unsigned long tsb_size_to_rss_limit(unsigned long new_size)
  * will not trigger any longer.
  *
  * The TSB can be anywhere from 8K to 1MB in size, in increasing powers
- * of two.  The TSB must be aligned to it's size, so f.e. a 512K TSB
+ * of two.  The TSB must be aligned to its size, so f.e. a 512K TSB
  * must be 512K aligned.  It also must be physically contiguous, so we
  * cannot use vmalloc().
  *
@@ -401,8 +402,8 @@ void tsb_grow(struct mm_struct *mm, unsigned long tsb_index, unsigned long rss)
 	unsigned long new_rss_limit;
 	gfp_t gfp_flags;
 
-	if (max_tsb_size > (PAGE_SIZE << MAX_ORDER))
-		max_tsb_size = (PAGE_SIZE << MAX_ORDER);
+	if (max_tsb_size > PAGE_SIZE << MAX_PAGE_ORDER)
+		max_tsb_size = PAGE_SIZE << MAX_PAGE_ORDER;
 
 	new_cache_index = 0;
 	for (new_size = 8192; new_size < max_tsb_size; new_size <<= 1UL) {
@@ -545,6 +546,9 @@ int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 
 	mm->context.sparc64_ctx_val = 0UL;
 
+	mm->context.tag_store = NULL;
+	spin_lock_init(&mm->context.tag_lock);
+
 #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
 	/* We reset them to zero because the fork() page copying
 	 * will re-increment the counters as the parent PTEs are
@@ -610,4 +614,22 @@ void destroy_context(struct mm_struct *mm)
 	}
 
 	spin_unlock_irqrestore(&ctx_alloc_lock, flags);
+
+	/* If ADI tag storage was allocated for this task, free it */
+	if (mm->context.tag_store) {
+		tag_storage_desc_t *tag_desc;
+		unsigned long max_desc;
+		unsigned char *tags;
+
+		tag_desc = mm->context.tag_store;
+		max_desc = PAGE_SIZE/sizeof(tag_storage_desc_t);
+		for (i = 0; i < max_desc; i++) {
+			tags = tag_desc->tags;
+			tag_desc->tags = NULL;
+			kfree(tags);
+			tag_desc++;
+		}
+		kfree(mm->context.tag_store);
+		mm->context.tag_store = NULL;
+	}
 }

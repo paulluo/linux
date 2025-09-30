@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <linux/unistd.h>
 
@@ -5,6 +6,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <os.h>
 #include <sysdep/tls.h>
 
 #ifndef PTRACE_GET_THREAD_AREA

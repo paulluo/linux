@@ -1,46 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
  * Copyright (C) 2017 Marvell Technology Group Ltd.
  *
- * This file is dual-licensed: you can use it either under the terms
- * of the GPLv2 or the X11 license, at your option. Note that this dual
- * licensing only applies to this file, and not this project as a
- * whole.
- *
- *  a) This library is free software; you can redistribute it and/or
- *     modify it under the terms of the GNU General Public License as
- *     published by the Free Software Foundation; either version 2 of the
- *     License, or (at your option) any later version.
- *
- *     This library is distributed in the hope that it will be useful,
- *     but WITHOUT ANY WARRANTY; without even the implied warranty of
- *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *     GNU General Public License for more details.
- *
- * Or, alternatively,
- *
- *  b) Permission is hereby granted, free of charge, to any person
- *     obtaining a copy of this software and associated documentation
- *     files (the "Software"), to deal in the Software without
- *     restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or
- *     sell copies of the Software, and to permit persons to whom the
- *     Software is furnished to do so, subject to the following
- *     conditions:
- *
- *     The above copyright notice and this permission notice shall be
- *     included in all copies or substantial portions of the Software.
- *
- *     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- *     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- *     OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- *     NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- *     HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- *     WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- *     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- *     OTHER DEALINGS IN THE SOFTWARE.
- */
-
-/*
  * Device Tree file for Marvell Armada AP810.
  */
 
@@ -49,10 +10,9 @@
 /dts-v1/;
 
 / {
-	model = "Marvell Armada AP810";
-	compatible = "marvell,armada-ap810";
 	#address-cells = <2>;
 	#size-cells = <2>;
+	interrupt-parent = <&gic>;
 
 	aliases {
 		serial0 = &uart0_ap0;
@@ -64,14 +24,21 @@
 		method = "smc";
 	};
 
-	ap810-ap0 {
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
+				<GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
+				<GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
+				<GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+	soc {
 		#address-cells = <2>;
 		#size-cells = <2>;
 		compatible = "simple-bus";
-		interrupt-parent = <&gic>;
 		ranges;
 
-		config-space@e8000000 {
+		bus@e8000000 {
 			#address-cells = <1>;
 			#size-cells = <1>;
 			compatible = "simple-bus";
@@ -93,20 +60,12 @@
 				      <0x00d0000 0x1000>,	/* GICH */
 				      <0x00e0000 0x2000>;	/* GICV */
 
-				gic_its_ap0: interrupt-controller@3040000 {
+				gic_its_ap0: msi-controller@3040000 {
 					compatible = "arm,gic-v3-its";
 					msi-controller;
 					#msi-cells = <1>;
 					reg = <0x3040000 0x20000>;
 				};
-			};
-
-			timer {
-				compatible = "arm,armv8-timer";
-				interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
-					     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
-					     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
-					     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
 			};
 
 			xor@400000 {

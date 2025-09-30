@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * (C) 2001 Clemson University and The University of Chicago
  *
@@ -8,8 +9,6 @@
 #define __ORANGEFS_BUFMAP_H
 
 int orangefs_bufmap_size_query(void);
-
-int orangefs_bufmap_shift_query(void);
 
 int orangefs_bufmap_initialize(struct ORANGEFS_dev_map_desc *user_desc);
 
@@ -32,5 +31,6 @@ int orangefs_bufmap_copy_from_iovec(struct iov_iter *iter,
 int orangefs_bufmap_copy_to_iovec(struct iov_iter *iter,
 			      int buffer_index,
 			      size_t size);
+
 
 #endif /* __ORANGEFS_BUFMAP_H */

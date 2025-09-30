@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Handle extern requests for shutdown, reboot and sysrq
  */
@@ -51,12 +52,6 @@ void xen_resume_notifier_register(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(xen_resume_notifier_register);
 
-void xen_resume_notifier_unregister(struct notifier_block *nb)
-{
-	raw_notifier_chain_unregister(&xen_resume_notifier, nb);
-}
-EXPORT_SYMBOL_GPL(xen_resume_notifier_unregister);
-
 #ifdef CONFIG_HIBERNATE_CALLBACKS
 static int xen_suspend(void *data)
 {
@@ -72,18 +67,15 @@ static int xen_suspend(void *data)
 	}
 
 	gnttab_suspend();
+	xen_manage_runstate_time(-1);
 	xen_arch_pre_suspend();
 
-	/*
-	 * This hypercall returns 1 if suspend was cancelled
-	 * or the domain was merely checkpointed, and 0 if it
-	 * is resuming in a new domain.
-	 */
 	si->cancelled = HYPERVISOR_suspend(xen_pv_domain()
                                            ? virt_to_gfn(xen_start_info)
                                            : 0);
 
 	xen_arch_post_suspend(si->cancelled);
+	xen_manage_runstate_time(si->cancelled ? 1 : 0);
 	gnttab_resume();
 
 	if (!si->cancelled) {
@@ -143,14 +135,14 @@ static void do_suspend(void)
 
 	raw_notifier_call_chain(&xen_resume_notifier, 0, NULL);
 
+	xen_arch_resume();
+
 	dpm_resume_start(si.cancelled ? PMSG_THAW : PMSG_RESTORE);
 
 	if (err) {
 		pr_err("failed to start xen_suspend: %d\n", err);
 		si.cancelled = 1;
 	}
-
-	xen_arch_resume();
 
 out_resume:
 	if (!si.cancelled)
@@ -181,6 +173,7 @@ static int poweroff_nb(struct notifier_block *cb, unsigned long code, void *unus
 	case SYS_HALT:
 	case SYS_POWER_OFF:
 		shutting_down = SHUTDOWN_POWEROFF;
+		break;
 	default:
 		break;
 	}
@@ -206,10 +199,10 @@ static void do_poweroff(void)
 static void do_reboot(void)
 {
 	shutting_down = SHUTDOWN_POWEROFF; /* ? */
-	ctrl_alt_del();
+	orderly_reboot();
 }
 
-static struct shutdown_handler shutdown_handlers[] = {
+static const struct shutdown_handler shutdown_handlers[] = {
 	{ "poweroff",	true,	do_poweroff },
 	{ "halt",	false,	do_poweroff },
 	{ "reboot",	true,	do_reboot   },
@@ -283,17 +276,26 @@ static void sysrq_handler(struct xenbus_watch *watch, const char *path,
 		/*
 		 * The Xenstore watch fires directly after registering it and
 		 * after a suspend/resume cycle. So ENOENT is no error but
-		 * might happen in those cases.
+		 * might happen in those cases. ERANGE is observed when we get
+		 * an empty value (''), this happens when we acknowledge the
+		 * request by writing '\0' below.
 		 */
-		if (err != -ENOENT)
+		if (err != -ENOENT && err != -ERANGE)
 			pr_err("Error %d reading sysrq code in control/sysrq\n",
 			       err);
 		xenbus_transaction_end(xbt, 1);
 		return;
 	}
 
-	if (sysrq_key != '\0')
-		xenbus_printf(xbt, "control", "sysrq", "%c", '\0');
+	if (sysrq_key != '\0') {
+		err = xenbus_printf(xbt, "control", "sysrq", "%c", '\0');
+		if (err) {
+			pr_err("%s: Error %d writing sysrq in control/sysrq\n",
+			       __func__, err);
+			xenbus_transaction_end(xbt, 1);
+			return;
+		}
+	}
 
 	err = xenbus_transaction_end(xbt, 0);
 	if (err == -EAGAIN)
@@ -345,7 +347,12 @@ static int setup_shutdown_watcher(void)
 			continue;
 		snprintf(node, FEATURE_PATH_SIZE, "feature-%s",
 			 shutdown_handlers[idx].command);
-		xenbus_printf(XBT_NIL, "control", node, "%u", 1);
+		err = xenbus_printf(XBT_NIL, "control", node, "%u", 1);
+		if (err) {
+			pr_err("%s: Error %d writing %s\n", __func__,
+				err, node);
+			return err;
+		}
 	}
 
 	return 0;

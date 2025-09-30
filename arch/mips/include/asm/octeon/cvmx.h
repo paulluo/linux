@@ -30,6 +30,7 @@
 
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/delay.h>
 
 enum cvmx_mips_space {
 	CVMX_MIPS_SPACE_XKSEG = 3LL,
@@ -153,13 +154,13 @@ static inline uint64_t cvmx_build_bits(uint64_t high_bit,
 
 /**
  * Convert a memory pointer (void*) into a hardware compatible
- * memory address (uint64_t). Octeon hardware widgets don't
+ * memory address (phys_addr_t). Octeon hardware widgets don't
  * understand logical addresses.
  *
  * @ptr:    C style memory pointer
  * Returns Hardware physical address
  */
-static inline uint64_t cvmx_ptr_to_phys(void *ptr)
+static inline phys_addr_t cvmx_ptr_to_phys(void *ptr)
 {
 	if (sizeof(void *) == 8) {
 		/*
@@ -429,18 +430,6 @@ static inline uint64_t cvmx_get_cycle(void)
 }
 
 /**
- * Wait for the specified number of cycle
- *
- */
-static inline void cvmx_wait(uint64_t cycles)
-{
-	uint64_t done = cvmx_get_cycle() + cycles;
-
-	while (cvmx_get_cycle() < done)
-		; /* Spin */
-}
-
-/**
  * Reads a chip global cycle counter.  This counts CPU cycles since
  * chip reset.	The counter is 64 bit.
  * This register does not exist on CN38XX pass 1 silicion
@@ -481,7 +470,7 @@ static inline uint64_t cvmx_get_cycle_global(void)
 				result = -1;				\
 				break;					\
 			} else						\
-				cvmx_wait(100);				\
+				__delay(100);				\
 		}							\
 	} while (0);							\
 	result;								\

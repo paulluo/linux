@@ -1,61 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Synchronous Compression operations
  *
  * Copyright 2015 LG Electronics Inc.
  * Copyright (c) 2016, Intel Corporation
  * Author: Giovanni Cabiddu <giovanni.cabiddu@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
-#include <linux/errno.h>
+
+#include <crypto/internal/scompress.h>
+#include <crypto/scatterwalk.h>
+#include <linux/cpumask.h>
+#include <linux/cryptouser.h>
+#include <linux/err.h>
+#include <linux/highmem.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
+#include <linux/scatterlist.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/crypto.h>
-#include <linux/compiler.h>
-#include <linux/vmalloc.h>
-#include <crypto/algapi.h>
-#include <linux/cryptouser.h>
+#include <linux/workqueue.h>
 #include <net/netlink.h>
-#include <linux/scatterlist.h>
-#include <crypto/scatterwalk.h>
-#include <crypto/internal/acompress.h>
-#include <crypto/internal/scompress.h>
-#include "internal.h"
+
+#include "compress.h"
+
+struct scomp_scratch {
+	spinlock_t	lock;
+	union {
+		void	*src;
+		unsigned long saddr;
+	};
+};
+
+static DEFINE_PER_CPU(struct scomp_scratch, scomp_scratch) = {
+	.lock = __SPIN_LOCK_UNLOCKED(scomp_scratch.lock),
+};
 
 static const struct crypto_type crypto_scomp_type;
-static void * __percpu *scomp_src_scratches;
-static void * __percpu *scomp_dst_scratches;
 static int scomp_scratch_users;
 static DEFINE_MUTEX(scomp_lock);
 
-#ifdef CONFIG_NET
-static int crypto_scomp_report(struct sk_buff *skb, struct crypto_alg *alg)
+static cpumask_t scomp_scratch_want;
+static void scomp_scratch_workfn(struct work_struct *work);
+static DECLARE_WORK(scomp_scratch_work, scomp_scratch_workfn);
+
+static int __maybe_unused crypto_scomp_report(
+	struct sk_buff *skb, struct crypto_alg *alg)
 {
 	struct crypto_report_comp rscomp;
 
-	strncpy(rscomp.type, "scomp", sizeof(rscomp.type));
+	memset(&rscomp, 0, sizeof(rscomp));
 
-	if (nla_put(skb, CRYPTOCFGA_REPORT_COMPRESS,
-		    sizeof(struct crypto_report_comp), &rscomp))
-		goto nla_put_failure;
-	return 0;
+	strscpy(rscomp.type, "scomp", sizeof(rscomp.type));
 
-nla_put_failure:
-	return -EMSGSIZE;
+	return nla_put(skb, CRYPTOCFGA_REPORT_COMPRESS,
+		       sizeof(rscomp), &rscomp);
 }
-#else
-static int crypto_scomp_report(struct sk_buff *skb, struct crypto_alg *alg)
-{
-	return -ENOSYS;
-}
-#endif
 
 static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
 	__maybe_unused;
@@ -65,170 +66,214 @@ static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
 	seq_puts(m, "type         : scomp\n");
 }
 
-static void crypto_scomp_free_scratches(void * __percpu *scratches)
+static void crypto_scomp_free_scratches(void)
 {
+	struct scomp_scratch *scratch;
 	int i;
-
-	if (!scratches)
-		return;
-
-	for_each_possible_cpu(i)
-		vfree(*per_cpu_ptr(scratches, i));
-
-	free_percpu(scratches);
-}
-
-static void * __percpu *crypto_scomp_alloc_scratches(void)
-{
-	void * __percpu *scratches;
-	int i;
-
-	scratches = alloc_percpu(void *);
-	if (!scratches)
-		return NULL;
 
 	for_each_possible_cpu(i) {
-		void *scratch;
+		scratch = per_cpu_ptr(&scomp_scratch, i);
 
-		scratch = vmalloc_node(SCOMP_SCRATCH_SIZE, cpu_to_node(i));
-		if (!scratch)
-			goto error;
-		*per_cpu_ptr(scratches, i) = scratch;
-	}
-
-	return scratches;
-
-error:
-	crypto_scomp_free_scratches(scratches);
-	return NULL;
-}
-
-static void crypto_scomp_free_all_scratches(void)
-{
-	if (!--scomp_scratch_users) {
-		crypto_scomp_free_scratches(scomp_src_scratches);
-		crypto_scomp_free_scratches(scomp_dst_scratches);
-		scomp_src_scratches = NULL;
-		scomp_dst_scratches = NULL;
+		free_page(scratch->saddr);
+		scratch->src = NULL;
 	}
 }
 
-static int crypto_scomp_alloc_all_scratches(void)
+static int scomp_alloc_scratch(struct scomp_scratch *scratch, int cpu)
 {
-	if (!scomp_scratch_users++) {
-		scomp_src_scratches = crypto_scomp_alloc_scratches();
-		if (!scomp_src_scratches)
-			return -ENOMEM;
-		scomp_dst_scratches = crypto_scomp_alloc_scratches();
-		if (!scomp_dst_scratches) {
-			crypto_scomp_free_scratches(scomp_src_scratches);
-			scomp_src_scratches = NULL;
-			return -ENOMEM;
-		}
-	}
+	int node = cpu_to_node(cpu);
+	struct page *page;
+
+	page = alloc_pages_node(node, GFP_KERNEL, 0);
+	if (!page)
+		return -ENOMEM;
+	spin_lock_bh(&scratch->lock);
+	scratch->src = page_address(page);
+	spin_unlock_bh(&scratch->lock);
 	return 0;
+}
+
+static void scomp_scratch_workfn(struct work_struct *work)
+{
+	int cpu;
+
+	for_each_cpu(cpu, &scomp_scratch_want) {
+		struct scomp_scratch *scratch;
+
+		scratch = per_cpu_ptr(&scomp_scratch, cpu);
+		if (scratch->src)
+			continue;
+		if (scomp_alloc_scratch(scratch, cpu))
+			break;
+
+		cpumask_clear_cpu(cpu, &scomp_scratch_want);
+	}
+}
+
+static int crypto_scomp_alloc_scratches(void)
+{
+	unsigned int i = cpumask_first(cpu_possible_mask);
+	struct scomp_scratch *scratch;
+
+	scratch = per_cpu_ptr(&scomp_scratch, i);
+	return scomp_alloc_scratch(scratch, i);
 }
 
 static int crypto_scomp_init_tfm(struct crypto_tfm *tfm)
 {
-	int ret;
+	struct scomp_alg *alg = crypto_scomp_alg(__crypto_scomp_tfm(tfm));
+	int ret = 0;
 
 	mutex_lock(&scomp_lock);
-	ret = crypto_scomp_alloc_all_scratches();
+	ret = crypto_acomp_alloc_streams(&alg->streams);
+	if (ret)
+		goto unlock;
+	if (!scomp_scratch_users++) {
+		ret = crypto_scomp_alloc_scratches();
+		if (ret)
+			scomp_scratch_users--;
+	}
+unlock:
 	mutex_unlock(&scomp_lock);
 
 	return ret;
 }
 
-static void crypto_scomp_sg_free(struct scatterlist *sgl)
+static struct scomp_scratch *scomp_lock_scratch(void) __acquires(scratch)
 {
-	int i, n;
-	struct page *page;
+	int cpu = raw_smp_processor_id();
+	struct scomp_scratch *scratch;
 
-	if (!sgl)
-		return;
+	scratch = per_cpu_ptr(&scomp_scratch, cpu);
+	spin_lock(&scratch->lock);
+	if (likely(scratch->src))
+		return scratch;
+	spin_unlock(&scratch->lock);
 
-	n = sg_nents(sgl);
-	for_each_sg(sgl, sgl, n, i) {
-		page = sg_page(sgl);
-		if (page)
-			__free_page(page);
-	}
+	cpumask_set_cpu(cpu, &scomp_scratch_want);
+	schedule_work(&scomp_scratch_work);
 
-	kfree(sgl);
+	scratch = per_cpu_ptr(&scomp_scratch, cpumask_first(cpu_possible_mask));
+	spin_lock(&scratch->lock);
+	return scratch;
 }
 
-static struct scatterlist *crypto_scomp_sg_alloc(size_t size, gfp_t gfp)
+static inline void scomp_unlock_scratch(struct scomp_scratch *scratch)
+	__releases(scratch)
 {
-	struct scatterlist *sgl;
-	struct page *page;
-	int i, n;
-
-	n = ((size - 1) >> PAGE_SHIFT) + 1;
-
-	sgl = kmalloc_array(n, sizeof(struct scatterlist), gfp);
-	if (!sgl)
-		return NULL;
-
-	sg_init_table(sgl, n);
-
-	for (i = 0; i < n; i++) {
-		page = alloc_page(gfp);
-		if (!page)
-			goto err;
-		sg_set_page(sgl + i, page, PAGE_SIZE, 0);
-	}
-
-	return sgl;
-
-err:
-	sg_mark_end(sgl + i);
-	crypto_scomp_sg_free(sgl);
-	return NULL;
+	spin_unlock(&scratch->lock);
 }
 
 static int scomp_acomp_comp_decomp(struct acomp_req *req, int dir)
 {
 	struct crypto_acomp *tfm = crypto_acomp_reqtfm(req);
-	void **tfm_ctx = acomp_tfm_ctx(tfm);
+	struct crypto_scomp **tfm_ctx = acomp_tfm_ctx(tfm);
+	bool src_isvirt = acomp_request_src_isvirt(req);
+	bool dst_isvirt = acomp_request_dst_isvirt(req);
 	struct crypto_scomp *scomp = *tfm_ctx;
-	void **ctx = acomp_request_ctx(req);
-	const int cpu = get_cpu();
-	u8 *scratch_src = *per_cpu_ptr(scomp_src_scratches, cpu);
-	u8 *scratch_dst = *per_cpu_ptr(scomp_dst_scratches, cpu);
+	struct crypto_acomp_stream *stream;
+	struct scomp_scratch *scratch;
+	unsigned int slen = req->slen;
+	unsigned int dlen = req->dlen;
+	struct page *spage, *dpage;
+	unsigned int n;
+	const u8 *src;
+	size_t soff;
+	size_t doff;
+	u8 *dst;
 	int ret;
 
-	if (!req->src || !req->slen || req->slen > SCOMP_SCRATCH_SIZE) {
-		ret = -EINVAL;
-		goto out;
+	if (!req->src || !slen)
+		return -EINVAL;
+
+	if (!req->dst || !dlen)
+		return -EINVAL;
+
+	if (dst_isvirt)
+		dst = req->dvirt;
+	else {
+		if (dlen <= req->dst->length) {
+			dpage = sg_page(req->dst);
+			doff = req->dst->offset;
+		} else
+			return -ENOSYS;
+
+		dpage = nth_page(dpage, doff / PAGE_SIZE);
+		doff = offset_in_page(doff);
+
+		n = (dlen - 1) / PAGE_SIZE;
+		n += (offset_in_page(dlen - 1) + doff) / PAGE_SIZE;
+		if (PageHighMem(dpage + n) &&
+		    size_add(doff, dlen) > PAGE_SIZE)
+			return -ENOSYS;
+		dst = kmap_local_page(dpage) + doff;
 	}
 
-	if (req->dst && !req->dlen) {
-		ret = -EINVAL;
-		goto out;
+	if (src_isvirt)
+		src = req->svirt;
+	else {
+		src = NULL;
+		do {
+			if (slen <= req->src->length) {
+				spage = sg_page(req->src);
+				soff = req->src->offset;
+			} else
+				break;
+
+			spage = nth_page(spage, soff / PAGE_SIZE);
+			soff = offset_in_page(soff);
+
+			n = (slen - 1) / PAGE_SIZE;
+			n += (offset_in_page(slen - 1) + soff) / PAGE_SIZE;
+			if (PageHighMem(nth_page(spage, n)) &&
+			    size_add(soff, slen) > PAGE_SIZE)
+				break;
+			src = kmap_local_page(spage) + soff;
+		} while (0);
 	}
 
-	if (!req->dlen || req->dlen > SCOMP_SCRATCH_SIZE)
-		req->dlen = SCOMP_SCRATCH_SIZE;
+	stream = crypto_acomp_lock_stream_bh(&crypto_scomp_alg(scomp)->streams);
 
-	scatterwalk_map_and_copy(scratch_src, req->src, 0, req->slen, 0);
-	if (dir)
-		ret = crypto_scomp_compress(scomp, scratch_src, req->slen,
-					    scratch_dst, &req->dlen, *ctx);
+	if (!src_isvirt && !src) {
+		const u8 *src;
+
+		scratch = scomp_lock_scratch();
+		src = scratch->src;
+		memcpy_from_sglist(scratch->src, req->src, 0, slen);
+
+		if (dir)
+			ret = crypto_scomp_compress(scomp, src, slen,
+						    dst, &dlen, stream->ctx);
+		else
+			ret = crypto_scomp_decompress(scomp, src, slen,
+						      dst, &dlen, stream->ctx);
+
+		scomp_unlock_scratch(scratch);
+	} else if (dir)
+		ret = crypto_scomp_compress(scomp, src, slen,
+					    dst, &dlen, stream->ctx);
 	else
-		ret = crypto_scomp_decompress(scomp, scratch_src, req->slen,
-					      scratch_dst, &req->dlen, *ctx);
-	if (!ret) {
-		if (!req->dst) {
-			req->dst = crypto_scomp_sg_alloc(req->dlen, GFP_ATOMIC);
-			if (!req->dst)
-				goto out;
+		ret = crypto_scomp_decompress(scomp, src, slen,
+					      dst, &dlen, stream->ctx);
+
+	crypto_acomp_unlock_stream_bh(stream);
+
+	req->dlen = dlen;
+
+	if (!src_isvirt && src)
+		kunmap_local(src);
+	if (!dst_isvirt) {
+		kunmap_local(dst);
+		dlen += doff;
+		for (;;) {
+			flush_dcache_page(dpage);
+			if (dlen <= PAGE_SIZE)
+				break;
+			dlen -= PAGE_SIZE;
+			dpage = nth_page(dpage, 1);
 		}
-		scatterwalk_map_and_copy(scratch_dst, req->dst, 0, req->dlen,
-					 1);
 	}
-out:
-	put_cpu();
+
 	return ret;
 }
 
@@ -248,8 +293,10 @@ static void crypto_exit_scomp_ops_async(struct crypto_tfm *tfm)
 
 	crypto_free_scomp(*ctx);
 
+	flush_work(&scomp_scratch_work);
 	mutex_lock(&scomp_lock);
-	crypto_scomp_free_all_scratches();
+	if (!--scomp_scratch_users)
+		crypto_scomp_free_scratches();
 	mutex_unlock(&scomp_lock);
 }
 
@@ -274,71 +321,59 @@ int crypto_init_scomp_ops_async(struct crypto_tfm *tfm)
 
 	crt->compress = scomp_acomp_compress;
 	crt->decompress = scomp_acomp_decompress;
-	crt->dst_free = crypto_scomp_sg_free;
-	crt->reqsize = sizeof(void *);
 
 	return 0;
 }
 
-struct acomp_req *crypto_acomp_scomp_alloc_ctx(struct acomp_req *req)
+static void crypto_scomp_destroy(struct crypto_alg *alg)
 {
-	struct crypto_acomp *acomp = crypto_acomp_reqtfm(req);
-	struct crypto_tfm *tfm = crypto_acomp_tfm(acomp);
-	struct crypto_scomp **tfm_ctx = crypto_tfm_ctx(tfm);
-	struct crypto_scomp *scomp = *tfm_ctx;
-	void *ctx;
+	struct scomp_alg *scomp = __crypto_scomp_alg(alg);
 
-	ctx = crypto_scomp_alloc_ctx(scomp);
-	if (IS_ERR(ctx)) {
-		kfree(req);
-		return NULL;
-	}
-
-	*req->__ctx = ctx;
-
-	return req;
-}
-
-void crypto_acomp_scomp_free_ctx(struct acomp_req *req)
-{
-	struct crypto_acomp *acomp = crypto_acomp_reqtfm(req);
-	struct crypto_tfm *tfm = crypto_acomp_tfm(acomp);
-	struct crypto_scomp **tfm_ctx = crypto_tfm_ctx(tfm);
-	struct crypto_scomp *scomp = *tfm_ctx;
-	void *ctx = *req->__ctx;
-
-	if (ctx)
-		crypto_scomp_free_ctx(scomp, ctx);
+	crypto_acomp_free_streams(&scomp->streams);
 }
 
 static const struct crypto_type crypto_scomp_type = {
 	.extsize = crypto_alg_extsize,
 	.init_tfm = crypto_scomp_init_tfm,
+	.destroy = crypto_scomp_destroy,
 #ifdef CONFIG_PROC_FS
 	.show = crypto_scomp_show,
 #endif
+#if IS_ENABLED(CONFIG_CRYPTO_USER)
 	.report = crypto_scomp_report,
+#endif
 	.maskclear = ~CRYPTO_ALG_TYPE_MASK,
 	.maskset = CRYPTO_ALG_TYPE_MASK,
 	.type = CRYPTO_ALG_TYPE_SCOMPRESS,
 	.tfmsize = offsetof(struct crypto_scomp, base),
+	.algsize = offsetof(struct scomp_alg, base),
 };
+
+static void scomp_prepare_alg(struct scomp_alg *alg)
+{
+	struct crypto_alg *base = &alg->calg.base;
+
+	comp_prepare_alg(&alg->calg);
+
+	base->cra_flags |= CRYPTO_ALG_REQ_VIRT;
+}
 
 int crypto_register_scomp(struct scomp_alg *alg)
 {
-	struct crypto_alg *base = &alg->base;
+	struct crypto_alg *base = &alg->calg.base;
+
+	scomp_prepare_alg(alg);
 
 	base->cra_type = &crypto_scomp_type;
-	base->cra_flags &= ~CRYPTO_ALG_TYPE_MASK;
 	base->cra_flags |= CRYPTO_ALG_TYPE_SCOMPRESS;
 
 	return crypto_register_alg(base);
 }
 EXPORT_SYMBOL_GPL(crypto_register_scomp);
 
-int crypto_unregister_scomp(struct scomp_alg *alg)
+void crypto_unregister_scomp(struct scomp_alg *alg)
 {
-	return crypto_unregister_alg(&alg->base);
+	crypto_unregister_alg(&alg->base);
 }
 EXPORT_SYMBOL_GPL(crypto_unregister_scomp);
 

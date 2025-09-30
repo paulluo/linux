@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #if !defined(_TRACE_KVMS390_H) || defined(TRACE_HEADER_MULTI_READ)
 #define _TRACE_KVMS390_H
 
@@ -55,7 +56,7 @@ TRACE_EVENT(kvm_s390_create_vcpu,
 		    __entry->sie_block = sie_block;
 		    ),
 
-	    TP_printk("create cpu %d at 0x%pK, sie block at 0x%pK",
+	    TP_printk("create cpu %d at 0x%p, sie block at 0x%p",
 		      __entry->id, __entry->vcpu, __entry->sie_block)
 	);
 
@@ -254,7 +255,7 @@ TRACE_EVENT(kvm_s390_enable_css,
 		    __entry->kvm = kvm;
 		    ),
 
-	    TP_printk("enabling channel I/O support (kvm @ %pK)\n",
+	    TP_printk("enabling channel I/O support (kvm @ %p)\n",
 		      __entry->kvm)
 	);
 
@@ -330,6 +331,29 @@ TRACE_EVENT(kvm_s390_airq_suppressed,
 
 	    TP_printk("adapter I/O interrupt suppressed (id:%x isc:%x)",
 		      __entry->id, __entry->isc)
+	);
+
+/*
+ * Trace point for gmap notifier calls.
+ */
+TRACE_EVENT(kvm_s390_gmap_notifier,
+	    TP_PROTO(unsigned long start, unsigned long end, unsigned int shadow),
+	    TP_ARGS(start, end, shadow),
+
+	    TP_STRUCT__entry(
+		    __field(unsigned long, start)
+		    __field(unsigned long, end)
+		    __field(unsigned int, shadow)
+		    ),
+
+	    TP_fast_assign(
+		    __entry->start = start;
+		    __entry->end = end;
+		    __entry->shadow = shadow;
+		    ),
+
+	    TP_printk("gmap notified (start:0x%lx end:0x%lx shadow:%d)",
+		      __entry->start, __entry->end, __entry->shadow)
 	);
 
 

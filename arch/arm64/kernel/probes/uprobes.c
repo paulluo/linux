@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2014-2016 Pratyush Anand <panand@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/highmem.h>
 #include <linux/ptrace.h>
@@ -20,12 +17,20 @@ void arch_uprobe_copy_ixol(struct page *page, unsigned long vaddr,
 	void *xol_page_kaddr = kmap_atomic(page);
 	void *dst = xol_page_kaddr + (vaddr & ~PAGE_MASK);
 
+	/*
+	 * Initial cache maintenance of the xol page done via set_pte_at().
+	 * Subsequent CMOs only needed if the xol slot changes.
+	 */
+	if (!memcmp(dst, src, len))
+		goto done;
+
 	/* Initialize the slot */
 	memcpy(dst, src, len);
 
 	/* flush caches (dcache/icache) */
-	sync_icache_aliases(dst, len);
+	sync_icache_aliases((unsigned long)dst, (unsigned long)dst + len);
 
+done:
 	kunmap_atomic(xol_page_kaddr);
 }
 
@@ -37,15 +42,15 @@ unsigned long uprobe_get_swbp_addr(struct pt_regs *regs)
 int arch_uprobe_analyze_insn(struct arch_uprobe *auprobe, struct mm_struct *mm,
 		unsigned long addr)
 {
-	probe_opcode_t insn;
+	u32 insn;
 
 	/* TODO: Currently we do not support AARCH32 instruction probing */
 	if (mm->context.flags & MMCF_AARCH32)
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	else if (!IS_ALIGNED(addr, AARCH64_INSN_SIZE))
 		return -EINVAL;
 
-	insn = *(probe_opcode_t *)(&auprobe->insn[0]);
+	insn = le32_to_cpu(auprobe->insn);
 
 	switch (arm_probe_decode_insn(insn, &auprobe->api)) {
 	case INSN_REJECTED:
@@ -105,13 +110,13 @@ bool arch_uprobe_xol_was_trapped(struct task_struct *t)
 
 bool arch_uprobe_skip_sstep(struct arch_uprobe *auprobe, struct pt_regs *regs)
 {
-	probe_opcode_t insn;
+	u32 insn;
 	unsigned long addr;
 
 	if (!auprobe->simulate)
 		return false;
 
-	insn = *(probe_opcode_t *)(&auprobe->insn[0]);
+	insn = le32_to_cpu(auprobe->insn);
 	addr = instruction_pointer(regs);
 
 	if (auprobe->api.handler)
@@ -168,49 +173,24 @@ int arch_uprobe_exception_notify(struct notifier_block *self,
 	return NOTIFY_DONE;
 }
 
-static int uprobe_breakpoint_handler(struct pt_regs *regs,
-		unsigned int esr)
+int uprobe_brk_handler(struct pt_regs *regs,
+				     unsigned long esr)
 {
-	if (user_mode(regs) && uprobe_pre_sstep_notifier(regs))
+	if (uprobe_pre_sstep_notifier(regs))
 		return DBG_HOOK_HANDLED;
 
 	return DBG_HOOK_ERROR;
 }
 
-static int uprobe_single_step_handler(struct pt_regs *regs,
-		unsigned int esr)
+int uprobe_single_step_handler(struct pt_regs *regs,
+				      unsigned long esr)
 {
 	struct uprobe_task *utask = current->utask;
 
-	if (user_mode(regs)) {
-		WARN_ON(utask &&
-			(instruction_pointer(regs) != utask->xol_vaddr + 4));
-
-		if (uprobe_post_sstep_notifier(regs))
-			return DBG_HOOK_HANDLED;
-	}
+	WARN_ON(utask && (instruction_pointer(regs) != utask->xol_vaddr + 4));
+	if (uprobe_post_sstep_notifier(regs))
+		return DBG_HOOK_HANDLED;
 
 	return DBG_HOOK_ERROR;
 }
 
-/* uprobe breakpoint handler hook */
-static struct break_hook uprobes_break_hook = {
-	.esr_mask = BRK64_ESR_MASK,
-	.esr_val = BRK64_ESR_UPROBES,
-	.fn = uprobe_breakpoint_handler,
-};
-
-/* uprobe single step handler hook */
-static struct step_hook uprobes_step_hook = {
-	.fn = uprobe_single_step_handler,
-};
-
-static int __init arch_init_uprobes(void)
-{
-	register_break_hook(&uprobes_break_hook);
-	register_step_hook(&uprobes_step_hook);
-
-	return 0;
-}
-
-device_initcall(arch_init_uprobes);

@@ -3,7 +3,7 @@
 #
 # where
 # 	PVR	Processor version
-# 	Version could be used to track version of of JSON file
+# 	Version could be used to track version of JSON file
 # 		but currently unused.
 # 	JSON/file/pathname is the path to JSON file, relative
 # 		to tools/perf/pmu-events/arch/powerpc/.
@@ -11,15 +11,9 @@
 #
 # Multiple PVRs could map to a single JSON file.
 #
-
-# Power8 entries
-004b0000,1,power8,core
-004b0201,1,power8,core
-004c0000,1,power8,core
-004d0000,1,power8,core
-004d0100,1,power8,core
-004d0200,1,power8,core
-004c0100,1,power8,core
-004e0100,1,power9,core
-004e0200,1,power9,core
-004e1200,1,power9,core
+0x004[bcd][[:xdigit:]]{4},1,power8,core
+0x0066[[:xdigit:]]{4},1,power8,core
+0x004e[[:xdigit:]]{4},1,power9,core
+0x0080[[:xdigit:]]{4},1,power10,core
+0x0082[[:xdigit:]]{4},1,power10,core
+0x00ffffff,1,compat,core

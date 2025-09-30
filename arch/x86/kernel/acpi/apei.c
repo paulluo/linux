@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Arch-specific APEI-related functions.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <acpi/apei.h>
@@ -53,7 +44,7 @@ void arch_apei_report_mem_error(int sev, struct cper_sec_mem_err *mem_err)
 #endif
 }
 
-void arch_apei_flush_tlb_one(unsigned long addr)
+int arch_apei_report_x86_error(struct cper_ia_proc_ctx *ctx_info, u64 lapic_id)
 {
-	__flush_tlb_one(addr);
+	return apei_smca_report_x86_error(ctx_info, lapic_id);
 }

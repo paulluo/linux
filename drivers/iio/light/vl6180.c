@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * vl6180.c - Support for STMicroelectronics VL6180 ALS, range and proximity
  * sensor
  *
  * Copyright 2017 Peter Meerwald-Stadler <pmeerw@pmeerw.net>
  * Copyright 2017 Manivannan Sadhasivam <manivannanece23@gmail.com>
- *
- * This file is subject to the terms and conditions of version 2 of
- * the GNU General Public License.  See the file COPYING in the main
- * directory of this archive for more details.
  *
  * IIO driver for VL6180 (7-bit I2C slave address 0x29)
  *
@@ -19,14 +16,19 @@
  */
 
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/mutex.h>
 #include <linux/err.h>
-#include <linux/of.h>
 #include <linux/delay.h>
+#include <linux/util_macros.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/iio/buffer.h>
+#include <linux/iio/trigger.h>
+#include <linux/iio/trigger_consumer.h>
+#include <linux/iio/triggered_buffer.h>
 
 #define VL6180_DRV_NAME "vl6180"
 
@@ -40,7 +42,9 @@
 #define VL6180_OUT_OF_RESET 0x016
 #define VL6180_HOLD 0x017
 #define VL6180_RANGE_START 0x018
+#define VL6180_RANGE_INTER_MEAS_TIME 0x01b
 #define VL6180_ALS_START 0x038
+#define VL6180_ALS_INTER_MEAS_TIME 0x03e
 #define VL6180_ALS_GAIN 0x03f
 #define VL6180_ALS_IT 0x040
 
@@ -86,6 +90,17 @@
 struct vl6180_data {
 	struct i2c_client *client;
 	struct mutex lock;
+	struct completion completion;
+	struct iio_trigger *trig;
+	unsigned int als_gain_milli;
+	unsigned int als_it_ms;
+	unsigned int als_meas_rate;
+	unsigned int range_meas_rate;
+
+	struct {
+		u16 chan[2];
+		aligned_s64 timestamp;
+	} scan;
 };
 
 enum { VL6180_ALS, VL6180_RANGE, VL6180_PROX };
@@ -207,29 +222,40 @@ static int vl6180_write_word(struct i2c_client *client, u16 cmd, u16 val)
 static int vl6180_measure(struct vl6180_data *data, int addr)
 {
 	struct i2c_client *client = data->client;
+	unsigned long time_left;
 	int tries = 20, ret;
 	u16 value;
 
 	mutex_lock(&data->lock);
+	reinit_completion(&data->completion);
+
 	/* Start single shot measurement */
 	ret = vl6180_write_byte(client,
 		vl6180_chan_regs_table[addr].start_reg, VL6180_STARTSTOP);
 	if (ret < 0)
 		goto fail;
 
-	while (tries--) {
-		ret = vl6180_read_byte(client, VL6180_INTR_STATUS);
-		if (ret < 0)
+	if (client->irq) {
+		time_left = wait_for_completion_timeout(&data->completion, HZ / 10);
+		if (time_left == 0) {
+			ret = -ETIMEDOUT;
 			goto fail;
+		}
+	} else {
+		while (tries--) {
+			ret = vl6180_read_byte(client, VL6180_INTR_STATUS);
+			if (ret < 0)
+				goto fail;
 
-		if (ret & vl6180_chan_regs_table[addr].drdy_mask)
-			break;
-		msleep(20);
-	}
+			if (ret & vl6180_chan_regs_table[addr].drdy_mask)
+				break;
+			msleep(20);
+		}
 
-	if (tries < 0) {
-		ret = -EIO;
-		goto fail;
+		if (tries < 0) {
+			ret = -EIO;
+			goto fail;
+		}
 	}
 
 	/* Read result value from appropriate registers */
@@ -258,36 +284,55 @@ static const struct iio_chan_spec vl6180_channels[] = {
 	{
 		.type = IIO_LIGHT,
 		.address = VL6180_ALS,
+		.scan_index = VL6180_ALS,
+		.scan_type = {
+			.sign = 'u',
+			.realbits = 16,
+			.storagebits = 16,
+		},
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
 			BIT(IIO_CHAN_INFO_INT_TIME) |
 			BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_HARDWAREGAIN),
+			BIT(IIO_CHAN_INFO_HARDWAREGAIN) |
+			BIT(IIO_CHAN_INFO_SAMP_FREQ),
 	}, {
 		.type = IIO_DISTANCE,
 		.address = VL6180_RANGE,
+		.scan_index = VL6180_RANGE,
+		.scan_type = {
+			.sign = 'u',
+			.realbits = 8,
+			.storagebits = 8,
+		},
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
-			BIT(IIO_CHAN_INFO_SCALE),
+			BIT(IIO_CHAN_INFO_SCALE) |
+			BIT(IIO_CHAN_INFO_SAMP_FREQ),
 	}, {
 		.type = IIO_PROXIMITY,
 		.address = VL6180_PROX,
+		.scan_index = VL6180_PROX,
+		.scan_type = {
+			.sign = 'u',
+			.realbits = 16,
+			.storagebits = 16,
+		},
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-	}
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(3),
 };
 
 /*
- * Columns 3 & 4 represent the same value in decimal and hex notations.
- * Kept in order to avoid the datatype conversion while reading the
- * hardware_gain.
+ * Available Ambient Light Sensor gain settings, 1/1000th, and
+ * corresponding setting for the VL6180_ALS_GAIN register
  */
-static const int vl6180_als_gain[8][4] = {
-	{ 1,	0,	70,	VL6180_ALS_GAIN_1 },
-	{ 1,    250000, 69,	VL6180_ALS_GAIN_1_25 },
-	{ 1,    670000, 68,	VL6180_ALS_GAIN_1_67 },
-	{ 2,    500000, 67,	VL6180_ALS_GAIN_2_5 },
-	{ 5,    0,      66,	VL6180_ALS_GAIN_5 },
-	{ 10,   0,      65,	VL6180_ALS_GAIN_10 },
-	{ 20,   0,      64,	VL6180_ALS_GAIN_20 },
-	{ 40,   0,      71,	VL6180_ALS_GAIN_40 }
+static const int vl6180_als_gain_tab[8] = {
+	1000, 1250, 1670, 2500, 5000, 10000, 20000, 40000
+};
+static const u8 vl6180_als_gain_tab_bits[8] = {
+	VL6180_ALS_GAIN_1,    VL6180_ALS_GAIN_1_25,
+	VL6180_ALS_GAIN_1_67, VL6180_ALS_GAIN_2_5,
+	VL6180_ALS_GAIN_5,    VL6180_ALS_GAIN_10,
+	VL6180_ALS_GAIN_20,   VL6180_ALS_GAIN_40
 };
 
 static int vl6180_read_raw(struct iio_dev *indio_dev,
@@ -295,7 +340,7 @@ static int vl6180_read_raw(struct iio_dev *indio_dev,
 				int *val, int *val2, long mask)
 {
 	struct vl6180_data *data = iio_priv(indio_dev);
-	int ret, i;
+	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
@@ -306,19 +351,20 @@ static int vl6180_read_raw(struct iio_dev *indio_dev,
 
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_INT_TIME:
-		ret = vl6180_read_word(data->client, VL6180_ALS_IT);
-		if (ret < 0)
-			return ret;
-		*val = 0; /* 1 count = 1ms (0 = 1ms) */
-		*val2 = (ret + 1) * 1000; /* convert to seconds */
+		*val = data->als_it_ms;
+		*val2 = 1000;
 
-		return IIO_VAL_INT_PLUS_MICRO;
+		return IIO_VAL_FRACTIONAL;
+
 	case IIO_CHAN_INFO_SCALE:
 		switch (chan->type) {
 		case IIO_LIGHT:
-			*val = 0; /* one ALS count is 0.32 Lux */
-			*val2 = 320000;
-			break;
+			/* one ALS count is 0.32 Lux @ gain 1, IT 100 ms */
+			*val = 32000; /* 0.32 * 1000 * 100 */
+			*val2 = data->als_gain_milli * data->als_it_ms;
+
+			return IIO_VAL_FRACTIONAL;
+
 		case IIO_DISTANCE:
 			*val = 0; /* sensor reports mm, scale to meter */
 			*val2 = 1000;
@@ -329,17 +375,23 @@ static int vl6180_read_raw(struct iio_dev *indio_dev,
 
 		return IIO_VAL_INT_PLUS_MICRO;
 	case IIO_CHAN_INFO_HARDWAREGAIN:
-		ret = vl6180_read_byte(data->client, VL6180_ALS_GAIN);
-		if (ret < 0)
+		*val = data->als_gain_milli;
+		*val2 = 1000;
+
+		return IIO_VAL_FRACTIONAL;
+
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		switch (chan->type) {
+		case IIO_DISTANCE:
+			*val = data->range_meas_rate;
+			return IIO_VAL_INT;
+		case IIO_LIGHT:
+			*val = data->als_meas_rate;
+			return IIO_VAL_INT;
+		default:
 			return -EINVAL;
-		for (i = 0; i < ARRAY_SIZE(vl6180_als_gain); i++) {
-			if (ret == vl6180_als_gain[i][2]) {
-				*val = vl6180_als_gain[i][0];
-				*val2 = vl6180_als_gain[i][1];
-			}
 		}
 
-		return IIO_VAL_INT_PLUS_MICRO;
 	default:
 		return -EINVAL;
 	}
@@ -365,37 +417,53 @@ static int vl6180_hold(struct vl6180_data *data, bool hold)
 
 static int vl6180_set_als_gain(struct vl6180_data *data, int val, int val2)
 {
-	int i, ret;
+	int i, ret, gain;
 
-	for (i = 0; i < ARRAY_SIZE(vl6180_als_gain); i++) {
-		if (val == vl6180_als_gain[i][0] &&
-			val2 == vl6180_als_gain[i][1]) {
-			mutex_lock(&data->lock);
-			ret = vl6180_hold(data, true);
-			if (ret < 0)
-				goto fail;
-			ret = vl6180_write_byte(data->client, VL6180_ALS_GAIN,
-				vl6180_als_gain[i][3]);
-fail:
-			vl6180_hold(data, false);
-			mutex_unlock(&data->lock);
-			return ret;
-		}
-	}
+	if (val < 1 || val > 40)
+		return -EINVAL;
 
-	return -EINVAL;
-}
+	gain = (val * 1000000 + val2) / 1000;
+	if (gain < 1 || gain > 40000)
+		return -EINVAL;
 
-static int vl6180_set_it(struct vl6180_data *data, int val2)
-{
-	int ret;
+	i = find_closest(gain, vl6180_als_gain_tab,
+			 ARRAY_SIZE(vl6180_als_gain_tab));
 
 	mutex_lock(&data->lock);
 	ret = vl6180_hold(data, true);
 	if (ret < 0)
 		goto fail;
-	ret = vl6180_write_word(data->client, VL6180_ALS_IT,
-		(val2 - 500) / 1000); /* write value in ms */
+
+	ret = vl6180_write_byte(data->client, VL6180_ALS_GAIN,
+				vl6180_als_gain_tab_bits[i]);
+
+	if (ret >= 0)
+		data->als_gain_milli = vl6180_als_gain_tab[i];
+
+fail:
+	vl6180_hold(data, false);
+	mutex_unlock(&data->lock);
+	return ret;
+}
+
+static int vl6180_set_it(struct vl6180_data *data, int val, int val2)
+{
+	int ret, it_ms;
+
+	it_ms = DIV_ROUND_CLOSEST(val2, 1000); /* round to ms */
+	if (val != 0 || it_ms < 1 || it_ms > 512)
+		return -EINVAL;
+
+	mutex_lock(&data->lock);
+	ret = vl6180_hold(data, true);
+	if (ret < 0)
+		goto fail;
+
+	ret = vl6180_write_word(data->client, VL6180_ALS_IT, it_ms - 1);
+
+	if (ret >= 0)
+		data->als_it_ms = it_ms;
+
 fail:
 	vl6180_hold(data, false);
 	mutex_unlock(&data->lock);
@@ -403,36 +471,153 @@ fail:
 	return ret;
 }
 
+static int vl6180_meas_reg_val_from_mhz(unsigned int mhz)
+{
+	unsigned int period = DIV_ROUND_CLOSEST(1000 * 1000, mhz);
+	unsigned int reg_val = 0;
+
+	if (period > 10)
+		reg_val = period < 2550 ? (DIV_ROUND_CLOSEST(period, 10) - 1) : 254;
+
+	return reg_val;
+}
+
 static int vl6180_write_raw(struct iio_dev *indio_dev,
 			     struct iio_chan_spec const *chan,
 			     int val, int val2, long mask)
 {
 	struct vl6180_data *data = iio_priv(indio_dev);
+	unsigned int reg_val;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_INT_TIME:
-		if (val != 0 || val2 < 500 || val2 >= 512500)
-			return -EINVAL;
+		return vl6180_set_it(data, val, val2);
 
-		return vl6180_set_it(data, val2);
 	case IIO_CHAN_INFO_HARDWAREGAIN:
 		if (chan->type != IIO_LIGHT)
 			return -EINVAL;
 
 		return vl6180_set_als_gain(data, val, val2);
+
+	case IIO_CHAN_INFO_SAMP_FREQ:
+	{
+		guard(mutex)(&data->lock);
+		switch (chan->type) {
+		case IIO_DISTANCE:
+			data->range_meas_rate = val;
+			reg_val = vl6180_meas_reg_val_from_mhz(val);
+			return vl6180_write_byte(data->client,
+				VL6180_RANGE_INTER_MEAS_TIME, reg_val);
+
+		case IIO_LIGHT:
+			data->als_meas_rate = val;
+			reg_val = vl6180_meas_reg_val_from_mhz(val);
+			return vl6180_write_byte(data->client,
+				VL6180_ALS_INTER_MEAS_TIME, reg_val);
+
+		default:
+			return -EINVAL;
+		}
+	}
+
 	default:
 		return -EINVAL;
 	}
+}
+
+static irqreturn_t vl6180_threaded_irq(int irq, void *priv)
+{
+	struct iio_dev *indio_dev = priv;
+	struct vl6180_data *data = iio_priv(indio_dev);
+
+	if (iio_buffer_enabled(indio_dev))
+		iio_trigger_poll_nested(indio_dev->trig);
+	else
+		complete(&data->completion);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t vl6180_trigger_handler(int irq, void *priv)
+{
+	struct iio_poll_func *pf = priv;
+	struct iio_dev *indio_dev = pf->indio_dev;
+	struct vl6180_data *data = iio_priv(indio_dev);
+	s64 time_ns = iio_get_time_ns(indio_dev);
+	int ret, bit, i = 0;
+
+	iio_for_each_active_channel(indio_dev, bit) {
+		if (vl6180_chan_regs_table[bit].word)
+			ret = vl6180_read_word(data->client,
+				vl6180_chan_regs_table[bit].value_reg);
+		else
+			ret = vl6180_read_byte(data->client,
+				vl6180_chan_regs_table[bit].value_reg);
+
+		if (ret < 0) {
+			dev_err(&data->client->dev,
+				"failed to read from value regs: %d\n", ret);
+			return IRQ_HANDLED;
+		}
+
+		data->scan.chan[i++] = ret;
+	}
+
+	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan, time_ns);
+	iio_trigger_notify_done(indio_dev->trig);
+
+	/* Clear the interrupt flag after data read */
+	ret = vl6180_write_byte(data->client, VL6180_INTR_CLEAR,
+		VL6180_CLEAR_ERROR | VL6180_CLEAR_ALS | VL6180_CLEAR_RANGE);
+	if (ret < 0)
+		dev_err(&data->client->dev, "failed to clear irq: %d\n", ret);
+
+	return IRQ_HANDLED;
 }
 
 static const struct iio_info vl6180_info = {
 	.read_raw = vl6180_read_raw,
 	.write_raw = vl6180_write_raw,
 	.attrs = &vl6180_attribute_group,
-	.driver_module = THIS_MODULE,
+	.validate_trigger = iio_validate_own_trigger,
 };
 
-static int vl6180_init(struct vl6180_data *data)
+static int vl6180_buffer_postenable(struct iio_dev *indio_dev)
+{
+	struct vl6180_data *data = iio_priv(indio_dev);
+	int bit;
+
+	iio_for_each_active_channel(indio_dev, bit)
+		return vl6180_write_byte(data->client,
+			vl6180_chan_regs_table[bit].start_reg,
+			VL6180_MODE_CONT | VL6180_STARTSTOP);
+
+	return -EINVAL;
+}
+
+static int vl6180_buffer_postdisable(struct iio_dev *indio_dev)
+{
+	struct vl6180_data *data = iio_priv(indio_dev);
+	int bit;
+
+	iio_for_each_active_channel(indio_dev, bit)
+		return vl6180_write_byte(data->client,
+			vl6180_chan_regs_table[bit].start_reg,
+			VL6180_STARTSTOP);
+
+	return -EINVAL;
+}
+
+static const struct iio_buffer_setup_ops iio_triggered_buffer_setup_ops = {
+	.postenable = &vl6180_buffer_postenable,
+	.postdisable = &vl6180_buffer_postdisable,
+};
+
+static const struct iio_trigger_ops vl6180_trigger_ops = {
+	.validate_device = iio_trigger_validate_own_device,
+};
+
+static int vl6180_init(struct vl6180_data *data, struct iio_dev *indio_dev)
 {
 	struct i2c_client *client = data->client;
 	int ret;
@@ -467,12 +652,34 @@ static int vl6180_init(struct vl6180_data *data)
 	if (ret < 0)
 		return ret;
 
+	ret = devm_iio_triggered_buffer_setup(&client->dev, indio_dev, NULL,
+						&vl6180_trigger_handler,
+						&iio_triggered_buffer_setup_ops);
+	if (ret)
+		return ret;
+
+	/* Default Range inter-measurement time: 50ms or 20000 mHz */
+	ret = vl6180_write_byte(client, VL6180_RANGE_INTER_MEAS_TIME,
+				vl6180_meas_reg_val_from_mhz(20000));
+	if (ret < 0)
+		return ret;
+	data->range_meas_rate = 20000;
+
+	/* Default ALS inter-measurement time: 10ms or 100000 mHz */
+	ret = vl6180_write_byte(client, VL6180_ALS_INTER_MEAS_TIME,
+				vl6180_meas_reg_val_from_mhz(100000));
+	if (ret < 0)
+		return ret;
+	data->als_meas_rate = 100000;
+
 	/* ALS integration time: 100ms */
+	data->als_it_ms = 100;
 	ret = vl6180_write_word(client, VL6180_ALS_IT, VL6180_ALS_IT_100);
 	if (ret < 0)
 		return ret;
 
 	/* ALS gain: 1 */
+	data->als_gain_milli = 1000;
 	ret = vl6180_write_byte(client, VL6180_ALS_GAIN, VL6180_ALS_GAIN_1);
 	if (ret < 0)
 		return ret;
@@ -484,8 +691,7 @@ static int vl6180_init(struct vl6180_data *data)
 	return vl6180_hold(data, false);
 }
 
-static int vl6180_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int vl6180_probe(struct i2c_client *client)
 {
 	struct vl6180_data *data;
 	struct iio_dev *indio_dev;
@@ -500,28 +706,51 @@ static int vl6180_probe(struct i2c_client *client,
 	data->client = client;
 	mutex_init(&data->lock);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->info = &vl6180_info;
 	indio_dev->channels = vl6180_channels;
 	indio_dev->num_channels = ARRAY_SIZE(vl6180_channels);
 	indio_dev->name = VL6180_DRV_NAME;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
-	ret = vl6180_init(data);
+	ret = vl6180_init(data, indio_dev);
 	if (ret < 0)
 		return ret;
+
+	if (client->irq) {
+		ret = devm_request_threaded_irq(&client->dev, client->irq,
+						NULL, vl6180_threaded_irq,
+						IRQF_ONESHOT,
+						indio_dev->name, indio_dev);
+		if (ret)
+			return dev_err_probe(&client->dev, ret, "devm_request_irq error \n");
+
+		init_completion(&data->completion);
+
+		data->trig = devm_iio_trigger_alloc(&client->dev, "%s-dev%d",
+						indio_dev->name, iio_device_id(indio_dev));
+		if (!data->trig)
+			return -ENOMEM;
+
+		data->trig->ops = &vl6180_trigger_ops;
+		iio_trigger_set_drvdata(data->trig, indio_dev);
+		ret = devm_iio_trigger_register(&client->dev, data->trig);
+		if (ret)
+			return ret;
+
+		indio_dev->trig = iio_trigger_get(data->trig);
+	}
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 static const struct of_device_id vl6180_of_match[] = {
 	{ .compatible = "st,vl6180", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, vl6180_of_match);
 
 static const struct i2c_device_id vl6180_id[] = {
-	{ "vl6180", 0 },
+	{ "vl6180" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vl6180_id);
@@ -529,9 +758,9 @@ MODULE_DEVICE_TABLE(i2c, vl6180_id);
 static struct i2c_driver vl6180_driver = {
 	.driver = {
 		.name   = VL6180_DRV_NAME,
-		.of_match_table = of_match_ptr(vl6180_of_match),
+		.of_match_table = vl6180_of_match,
 	},
-	.probe  = vl6180_probe,
+	.probe = vl6180_probe,
 	.id_table = vl6180_id,
 };
 

@@ -191,9 +191,9 @@ static void ath_mci_ftp_adjust(struct ath_softc *sc)
  * 45ms, bt traffic will be given priority during 55% of this
  * period while wlan gets remaining 45%
  */
-static void ath_btcoex_period_timer(unsigned long data)
+static void ath_btcoex_period_timer(struct timer_list *t)
 {
-	struct ath_softc *sc = (struct ath_softc *) data;
+	struct ath_softc *sc = timer_container_of(sc, t, btcoex.period_timer);
 	struct ath_hw *ah = sc->sc_ah;
 	struct ath_btcoex *btcoex = &sc->btcoex;
 	enum ath_stomp_type stomp_type;
@@ -252,9 +252,10 @@ skip_hw_wakeup:
  * Generic tsf based hw timer which configures weight
  * registers to time slice between wlan and bt traffic
  */
-static void ath_btcoex_no_stomp_timer(unsigned long arg)
+static void ath_btcoex_no_stomp_timer(struct timer_list *t)
 {
-	struct ath_softc *sc = (struct ath_softc *)arg;
+	struct ath_softc *sc = timer_container_of(sc, t,
+						  btcoex.no_stomp_timer);
 	struct ath_hw *ah = sc->sc_ah;
 	struct ath_btcoex *btcoex = &sc->btcoex;
 
@@ -284,10 +285,8 @@ static void ath_init_btcoex_timer(struct ath_softc *sc)
 				   btcoex->btcoex_period / 100;
 	btcoex->bt_stomp_type = ATH_BTCOEX_STOMP_LOW;
 
-	setup_timer(&btcoex->period_timer, ath_btcoex_period_timer,
-			(unsigned long) sc);
-	setup_timer(&btcoex->no_stomp_timer, ath_btcoex_no_stomp_timer,
-			(unsigned long) sc);
+	timer_setup(&btcoex->period_timer, ath_btcoex_period_timer, 0);
+	timer_setup(&btcoex->no_stomp_timer, ath_btcoex_no_stomp_timer, 0);
 
 	spin_lock_init(&btcoex->btcoex_lock);
 }
@@ -307,7 +306,7 @@ void ath9k_btcoex_timer_resume(struct ath_softc *sc)
 	ath_dbg(ath9k_hw_common(ah), BTCOEX, "Starting btcoex timers\n");
 
 	/* make sure duty cycle timer is also stopped when resuming */
-	del_timer_sync(&btcoex->no_stomp_timer);
+	timer_delete_sync(&btcoex->no_stomp_timer);
 
 	btcoex->bt_priority_cnt = 0;
 	btcoex->bt_priority_time = jiffies;
@@ -331,15 +330,15 @@ void ath9k_btcoex_timer_pause(struct ath_softc *sc)
 
 	ath_dbg(ath9k_hw_common(ah), BTCOEX, "Stopping btcoex timers\n");
 
-	del_timer_sync(&btcoex->period_timer);
-	del_timer_sync(&btcoex->no_stomp_timer);
+	timer_delete_sync(&btcoex->period_timer);
+	timer_delete_sync(&btcoex->no_stomp_timer);
 }
 
 void ath9k_btcoex_stop_gen_timer(struct ath_softc *sc)
 {
 	struct ath_btcoex *btcoex = &sc->btcoex;
 
-	del_timer_sync(&btcoex->no_stomp_timer);
+	timer_delete_sync(&btcoex->no_stomp_timer);
 }
 
 u16 ath9k_btcoex_aggr_limit(struct ath_softc *sc, u32 max_4ms_framelen)

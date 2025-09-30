@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM page_ref
 
@@ -29,7 +30,7 @@ DECLARE_EVENT_CLASS(page_ref_mod_template,
 		__entry->pfn = page_to_pfn(page);
 		__entry->flags = page->flags;
 		__entry->count = page_ref_count(page);
-		__entry->mapcount = page_mapcount(page);
+		__entry->mapcount = atomic_read(&page->_mapcount);
 		__entry->mapping = page->mapping;
 		__entry->mt = get_pageblock_migratetype(page);
 		__entry->val = v;
@@ -37,7 +38,7 @@ DECLARE_EVENT_CLASS(page_ref_mod_template,
 
 	TP_printk("pfn=0x%lx flags=%s count=%d mapcount=%d mapping=%p mt=%d val=%d",
 		__entry->pfn,
-		show_page_flags(__entry->flags & ((1UL << NR_PAGEFLAGS) - 1)),
+		show_page_flags(__entry->flags & PAGEFLAGS_MASK),
 		__entry->count,
 		__entry->mapcount, __entry->mapping, __entry->mt,
 		__entry->val)
@@ -78,7 +79,7 @@ DECLARE_EVENT_CLASS(page_ref_mod_and_test_template,
 		__entry->pfn = page_to_pfn(page);
 		__entry->flags = page->flags;
 		__entry->count = page_ref_count(page);
-		__entry->mapcount = page_mapcount(page);
+		__entry->mapcount = atomic_read(&page->_mapcount);
 		__entry->mapping = page->mapping;
 		__entry->mt = get_pageblock_migratetype(page);
 		__entry->val = v;
@@ -87,7 +88,7 @@ DECLARE_EVENT_CLASS(page_ref_mod_and_test_template,
 
 	TP_printk("pfn=0x%lx flags=%s count=%d mapcount=%d mapping=%p mt=%d val=%d ret=%d",
 		__entry->pfn,
-		show_page_flags(__entry->flags & ((1UL << NR_PAGEFLAGS) - 1)),
+		show_page_flags(__entry->flags & PAGEFLAGS_MASK),
 		__entry->count,
 		__entry->mapcount, __entry->mapping, __entry->mt,
 		__entry->val, __entry->ret)

@@ -45,7 +45,7 @@
 #include "cmd.h"
 
 #define ADD(buf, off, max, fmt, args...)				\
-	off += snprintf(&buf[off], max - off, fmt, ##args);
+	off += scnprintf(&buf[off], max - off, fmt, ##args)
 
 
 struct carl9170_debugfs_fops {
@@ -54,7 +54,6 @@ struct carl9170_debugfs_fops {
 	char *(*read)(struct ar9170 *ar, char *buf, size_t bufsize,
 		      ssize_t *len);
 	ssize_t (*write)(struct ar9170 *aru, const char *buf, size_t size);
-	const struct file_operations fops;
 
 	enum carl9170_device_state req_dev_state;
 };
@@ -62,7 +61,7 @@ struct carl9170_debugfs_fops {
 static ssize_t carl9170_debugfs_read(struct file *file, char __user *userbuf,
 				     size_t count, loff_t *ppos)
 {
-	struct carl9170_debugfs_fops *dfops;
+	const struct carl9170_debugfs_fops *dfops;
 	struct ar9170 *ar;
 	char *buf = NULL, *res_buf = NULL;
 	ssize_t ret = 0;
@@ -75,8 +74,7 @@ static ssize_t carl9170_debugfs_read(struct file *file, char __user *userbuf,
 
 	if (!ar)
 		return -ENODEV;
-	dfops = container_of(debugfs_real_fops(file),
-			     struct carl9170_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 
 	if (!dfops->read)
 		return -ENOSYS;
@@ -113,7 +111,7 @@ out_free:
 static ssize_t carl9170_debugfs_write(struct file *file,
 	const char __user *userbuf, size_t count, loff_t *ppos)
 {
-	struct carl9170_debugfs_fops *dfops;
+	const struct carl9170_debugfs_fops *dfops;
 	struct ar9170 *ar;
 	char *buf = NULL;
 	int err = 0;
@@ -128,8 +126,7 @@ static ssize_t carl9170_debugfs_write(struct file *file,
 
 	if (!ar)
 		return -ENODEV;
-	dfops = container_of(debugfs_real_fops(file),
-			     struct carl9170_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 
 	if (!dfops->write)
 		return -ENOSYS;
@@ -165,6 +162,11 @@ out_free:
 	return err;
 }
 
+static struct debugfs_short_fops debugfs_fops = {
+	.read	= carl9170_debugfs_read,
+	.write	= carl9170_debugfs_write,
+};
+
 #define __DEBUGFS_DECLARE_FILE(name, _read, _write, _read_bufsize,	\
 			       _attr, _dstate)				\
 static const struct carl9170_debugfs_fops carl_debugfs_##name ##_ops = {\
@@ -173,12 +175,6 @@ static const struct carl9170_debugfs_fops carl_debugfs_##name ##_ops = {\
 	.write = _write,						\
 	.attr = _attr,							\
 	.req_dev_state = _dstate,					\
-	.fops = {							\
-		.open	= simple_open,					\
-		.read	= carl9170_debugfs_read,			\
-		.write	= carl9170_debugfs_write,			\
-		.owner	= THIS_MODULE					\
-	},								\
 }
 
 #define DEBUGFS_DECLARE_FILE(name, _read, _write, _read_bufsize, _attr)	\
@@ -187,21 +183,21 @@ static const struct carl9170_debugfs_fops carl_debugfs_##name ##_ops = {\
 
 #define DEBUGFS_DECLARE_RO_FILE(name, _read_bufsize)			\
 	DEBUGFS_DECLARE_FILE(name, carl9170_debugfs_##name ##_read,	\
-			     NULL, _read_bufsize, S_IRUSR)
+			     NULL, _read_bufsize, 0400)
 
 #define DEBUGFS_DECLARE_WO_FILE(name)					\
 	DEBUGFS_DECLARE_FILE(name, NULL, carl9170_debugfs_##name ##_write,\
-			     0, S_IWUSR)
+			     0, 0200)
 
 #define DEBUGFS_DECLARE_RW_FILE(name, _read_bufsize)			\
 	DEBUGFS_DECLARE_FILE(name, carl9170_debugfs_##name ##_read,	\
 			     carl9170_debugfs_##name ##_write,		\
-			     _read_bufsize, S_IRUSR | S_IWUSR)
+			     _read_bufsize, 0600)
 
 #define __DEBUGFS_DECLARE_RW_FILE(name, _read_bufsize, _dstate)		\
 	__DEBUGFS_DECLARE_FILE(name, carl9170_debugfs_##name ##_read,	\
 			     carl9170_debugfs_##name ##_write,		\
-			     _read_bufsize, S_IRUSR | S_IWUSR, _dstate)
+			     _read_bufsize, 0600, _dstate)
 
 #define DEBUGFS_READONLY_FILE(name, _read_bufsize, fmt, value...)	\
 static char *carl9170_debugfs_ ##name ## _read(struct ar9170 *ar,	\
@@ -816,9 +812,9 @@ void carl9170_debugfs_register(struct ar9170 *ar)
 		ar->hw->wiphy->debugfsdir);
 
 #define DEBUGFS_ADD(name)						\
-	debugfs_create_file(#name, carl_debugfs_##name ##_ops.attr,	\
-			    ar->debug_dir, ar,				\
-			    &carl_debugfs_##name ## _ops.fops);
+	debugfs_create_file_aux(#name, carl_debugfs_##name ##_ops.attr,	\
+			    ar->debug_dir, ar, &carl_debugfs_##name ## _ops, \
+			    &debugfs_fops)
 
 	DEBUGFS_ADD(usb_tx_anch_urbs);
 	DEBUGFS_ADD(usb_rx_pool_urbs);

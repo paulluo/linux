@@ -1,25 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl18xx
  *
  * Copyright (C) 2011 Texas Instruments
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/ip.h>
 #include <linux/firmware.h>
@@ -1190,8 +1177,49 @@ static int wl18xx_hw_init(struct wl1271 *wl)
 	return ret;
 }
 
-static void wl18xx_convert_fw_status(struct wl1271 *wl, void *raw_fw_status,
-				     struct wl_fw_status *fw_status)
+static void wl18xx_convert_fw_status_8_9_1(struct wl1271 *wl,
+					   void *raw_fw_status,
+					   struct wl_fw_status *fw_status)
+{
+	struct wl18xx_fw_status_8_9_1 *int_fw_status = raw_fw_status;
+
+	fw_status->intr = le32_to_cpu(int_fw_status->intr);
+	fw_status->fw_rx_counter = int_fw_status->fw_rx_counter;
+	fw_status->drv_rx_counter = int_fw_status->drv_rx_counter;
+	fw_status->tx_results_counter = int_fw_status->tx_results_counter;
+	fw_status->rx_pkt_descs = int_fw_status->rx_pkt_descs;
+
+	fw_status->fw_localtime = le32_to_cpu(int_fw_status->fw_localtime);
+	fw_status->link_ps_bitmap = le32_to_cpu(int_fw_status->link_ps_bitmap);
+	fw_status->link_fast_bitmap =
+			le32_to_cpu(int_fw_status->link_fast_bitmap);
+	fw_status->total_released_blks =
+			le32_to_cpu(int_fw_status->total_released_blks);
+	fw_status->tx_total = le32_to_cpu(int_fw_status->tx_total);
+
+	fw_status->counters.tx_released_pkts =
+			int_fw_status->counters.tx_released_pkts;
+	fw_status->counters.tx_lnk_free_pkts =
+			int_fw_status->counters.tx_lnk_free_pkts;
+	fw_status->counters.tx_lnk_sec_pn16 =
+			int_fw_status->counters.tx_lnk_sec_pn16;
+	fw_status->counters.tx_voice_released_blks =
+			int_fw_status->counters.tx_voice_released_blks;
+	fw_status->counters.tx_last_rate =
+			int_fw_status->counters.tx_last_rate;
+	fw_status->counters.tx_last_rate_mbps =
+			int_fw_status->counters.tx_last_rate_mbps;
+	fw_status->counters.hlid =
+			int_fw_status->counters.hlid;
+
+	fw_status->log_start_addr = le32_to_cpu(int_fw_status->log_start_addr);
+
+	fw_status->priv = &int_fw_status->priv;
+}
+
+static void wl18xx_convert_fw_status_8_9_0(struct wl1271 *wl,
+					   void *raw_fw_status,
+					   struct wl_fw_status *fw_status)
 {
 	struct wl18xx_fw_status *int_fw_status = raw_fw_status;
 
@@ -1225,6 +1253,15 @@ static void wl18xx_convert_fw_status(struct wl1271 *wl, void *raw_fw_status,
 	fw_status->log_start_addr = le32_to_cpu(int_fw_status->log_start_addr);
 
 	fw_status->priv = &int_fw_status->priv;
+}
+
+static void wl18xx_convert_fw_status(struct wl1271 *wl, void *raw_fw_status,
+				     struct wl_fw_status *fw_status)
+{
+	if (wl->chip.fw_ver[FW_VER_MAJOR] == 0)
+		wl18xx_convert_fw_status_8_9_0(wl, raw_fw_status, fw_status);
+	else
+		wl18xx_convert_fw_status_8_9_1(wl, raw_fw_status, fw_status);
 }
 
 static void wl18xx_set_tx_desc_csum(struct wl1271 *wl,
@@ -1528,14 +1565,28 @@ static int wl18xx_handle_static_data(struct wl1271 *wl,
 {
 	struct wl18xx_static_data_priv *static_data_priv =
 		(struct wl18xx_static_data_priv *) static_data->priv;
+	size_t fw_status_len;
 
-	strncpy(wl->chip.phy_fw_ver_str, static_data_priv->phy_version,
+	strscpy(wl->chip.phy_fw_ver_str, static_data_priv->phy_version,
 		sizeof(wl->chip.phy_fw_ver_str));
 
-	/* make sure the string is NULL-terminated */
-	wl->chip.phy_fw_ver_str[sizeof(wl->chip.phy_fw_ver_str) - 1] = '\0';
-
 	wl1271_info("PHY firmware version: %s", static_data_priv->phy_version);
+
+	/* Adjust the firmware status size according to the firmware version */
+	if (wl->chip.fw_ver[FW_VER_MAJOR] == 0)
+		fw_status_len = sizeof(struct wl18xx_fw_status);
+	else
+		fw_status_len = sizeof(struct wl18xx_fw_status_8_9_1);
+
+	if (wl->fw_status_len != fw_status_len) {
+		void *new_status = krealloc(wl->raw_fw_status, fw_status_len,
+					    GFP_KERNEL | __GFP_ZERO);
+		if (!new_status)
+			return -ENOMEM;
+
+		wl->raw_fw_status = new_status;
+		wl->fw_status_len = fw_status_len;
+	}
 
 	return 0;
 }
@@ -1860,44 +1911,6 @@ static const struct ieee80211_iface_limit wl18xx_iface_ap_limits[] = {
 	},
 };
 
-static const struct ieee80211_iface_limit wl18xx_iface_ap_cl_limits[] = {
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_STATION),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_AP),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_P2P_CLIENT),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_P2P_DEVICE),
-	},
-};
-
-static const struct ieee80211_iface_limit wl18xx_iface_ap_go_limits[] = {
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_STATION),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_AP),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_P2P_GO),
-	},
-	{
-		.max = 1,
-		.types = BIT(NL80211_IFTYPE_P2P_DEVICE),
-	},
-};
-
 static const struct ieee80211_iface_combination
 wl18xx_iface_combinations[] = {
 	{
@@ -2086,63 +2099,61 @@ static struct platform_driver wl18xx_driver = {
 	.probe		= wl18xx_probe,
 	.remove		= wlcore_remove,
 	.id_table	= wl18xx_id_table,
-	.driver = {
+	.driver		= {
 		.name	= "wl18xx_driver",
 	}
 };
 
 module_platform_driver(wl18xx_driver);
-module_param_named(ht_mode, ht_mode_param, charp, S_IRUSR);
+module_param_named(ht_mode, ht_mode_param, charp, 0400);
 MODULE_PARM_DESC(ht_mode, "Force HT mode: wide or siso20");
 
-module_param_named(board_type, board_type_param, charp, S_IRUSR);
+module_param_named(board_type, board_type_param, charp, 0400);
 MODULE_PARM_DESC(board_type, "Board type: fpga, hdk (default), evb, com8 or "
 		 "dvp");
 
-module_param_named(checksum, checksum_param, bool, S_IRUSR);
+module_param_named(checksum, checksum_param, bool, 0400);
 MODULE_PARM_DESC(checksum, "Enable TCP checksum: boolean (defaults to false)");
 
-module_param_named(dc2dc, dc2dc_param, int, S_IRUSR);
+module_param_named(dc2dc, dc2dc_param, int, 0400);
 MODULE_PARM_DESC(dc2dc, "External DC2DC: u8 (defaults to 0)");
 
-module_param_named(n_antennas_2, n_antennas_2_param, int, S_IRUSR);
+module_param_named(n_antennas_2, n_antennas_2_param, int, 0400);
 MODULE_PARM_DESC(n_antennas_2,
 		 "Number of installed 2.4GHz antennas: 1 (default) or 2");
 
-module_param_named(n_antennas_5, n_antennas_5_param, int, S_IRUSR);
+module_param_named(n_antennas_5, n_antennas_5_param, int, 0400);
 MODULE_PARM_DESC(n_antennas_5,
 		 "Number of installed 5GHz antennas: 1 (default) or 2");
 
-module_param_named(low_band_component, low_band_component_param, int,
-		   S_IRUSR);
+module_param_named(low_band_component, low_band_component_param, int, 0400);
 MODULE_PARM_DESC(low_band_component, "Low band component: u8 "
 		 "(default is 0x01)");
 
 module_param_named(low_band_component_type, low_band_component_type_param,
-		   int, S_IRUSR);
+		   int, 0400);
 MODULE_PARM_DESC(low_band_component_type, "Low band component type: u8 "
 		 "(default is 0x05 or 0x06 depending on the board_type)");
 
-module_param_named(high_band_component, high_band_component_param, int,
-		   S_IRUSR);
+module_param_named(high_band_component, high_band_component_param, int, 0400);
 MODULE_PARM_DESC(high_band_component, "High band component: u8, "
 		 "(default is 0x01)");
 
 module_param_named(high_band_component_type, high_band_component_type_param,
-		   int, S_IRUSR);
+		   int, 0400);
 MODULE_PARM_DESC(high_band_component_type, "High band component type: u8 "
 		 "(default is 0x09)");
 
 module_param_named(pwr_limit_reference_11_abg,
-		   pwr_limit_reference_11_abg_param, int, S_IRUSR);
+		   pwr_limit_reference_11_abg_param, int, 0400);
 MODULE_PARM_DESC(pwr_limit_reference_11_abg, "Power limit reference: u8 "
 		 "(default is 0xc8)");
 
-module_param_named(num_rx_desc,
-		   num_rx_desc_param, int, S_IRUSR);
+module_param_named(num_rx_desc, num_rx_desc_param, int, 0400);
 MODULE_PARM_DESC(num_rx_desc_param,
 		 "Number of Rx descriptors: u8 (default is 32)");
 
+MODULE_DESCRIPTION("TI WiLink 8 wireless driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Luciano Coelho <coelho@ti.com>");
 MODULE_FIRMWARE(WL18XX_FW_NAME);

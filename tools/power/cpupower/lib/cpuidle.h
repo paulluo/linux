@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __CPUPOWER_CPUIDLE_H__
 #define __CPUPOWER_CPUIDLE_H__
 
@@ -6,6 +7,8 @@ int cpuidle_is_state_disabled(unsigned int cpu,
 int cpuidle_state_disable(unsigned int cpu, unsigned int idlestate,
 				   unsigned int disable);
 unsigned long cpuidle_state_latency(unsigned int cpu,
+						unsigned int idlestate);
+unsigned long cpuidle_state_residency(unsigned int cpu,
 						unsigned int idlestate);
 unsigned long cpuidle_state_usage(unsigned int cpu,
 					unsigned int idlestate);

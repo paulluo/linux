@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FDT Address translation based on u-boot fdt_support.c which in turn was
  * based on the kernel unflattened DT address translation code.
@@ -6,11 +7,6 @@
  * Gerald Van Baren, Custom IDEAS, vanbaren@cideas.com
  *
  * Copyright 2010-2011 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
  */
 
 #define pr_fmt(fmt)	"OF: fdt: " fmt
@@ -21,23 +17,10 @@
 #include <linux/of_fdt.h>
 #include <linux/sizes.h>
 
-/* Max address size we deal with */
-#define OF_MAX_ADDR_CELLS	4
-#define OF_CHECK_COUNTS(na, ns)	((na) > 0 && (na) <= OF_MAX_ADDR_CELLS && \
-			(ns) > 0)
+/* Uncomment me to enable of_dump_addr() debugging output */
+// #define DEBUG
 
-/* Debug utility */
-#ifdef DEBUG
-static void __init of_dump_addr(const char *s, const __be32 *addr, int na)
-{
-	pr_debug("%s", s);
-	while(na--)
-		pr_cont(" %08x", *(addr++));
-	pr_cont("\n");
-}
-#else
-static void __init of_dump_addr(const char *s, const __be32 *addr, int na) { }
-#endif
+#include "of_private.h"
 
 /* Callbacks for bus specific translators */
 struct of_bus {
@@ -59,7 +42,7 @@ static void __init fdt_bus_default_count_cells(const void *blob, int parentoffse
 		if (prop)
 			*addrc = be32_to_cpup(prop);
 		else
-			*addrc = dt_root_addr_cells;
+			*addrc = -1;
 	}
 
 	if (sizec) {
@@ -67,7 +50,7 @@ static void __init fdt_bus_default_count_cells(const void *blob, int parentoffse
 		if (prop)
 			*sizec = be32_to_cpup(prop);
 		else
-			*sizec = dt_root_size_cells;
+			*sizec = -1;
 	}
 }
 

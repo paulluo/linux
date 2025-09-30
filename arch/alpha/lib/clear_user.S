@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * arch/alpha/lib/clear_user.S
  * Contributed by Richard Henderson <rth@tamu.edu>
@@ -9,7 +10,7 @@
  * a successful copy).  There is also some rather minor exception setup
  * stuff.
  */
-#include <asm/export.h>
+#include <linux/export.h>
 
 /* Allow an exception for an insn; exit if we get one.  */
 #define EX(x,y...)			\

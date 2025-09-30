@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stdlib.h>
 
 #if !defined(__UCLIBC__)
@@ -15,5 +16,5 @@ int main(void)
 	const char *version = XSTR(__GLIBC__) "." XSTR(__GLIBC_MINOR__);
 #endif
 
-	return (long)version;
+	return version == NULL;
 }

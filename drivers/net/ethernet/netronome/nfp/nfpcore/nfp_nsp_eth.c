@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2015-2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2015-2017 Netronome Systems, Inc. */
 
 /* Authors: David Brunecz <david.brunecz@netronome.com>
  *          Jakub Kicinski <jakub.kicinski@netronome.com>
@@ -55,6 +25,9 @@
 #define NSP_ETH_PORT_INDEX		GENMASK_ULL(15, 8)
 #define NSP_ETH_PORT_LABEL		GENMASK_ULL(53, 48)
 #define NSP_ETH_PORT_PHYLABEL		GENMASK_ULL(59, 54)
+#define NSP_ETH_PORT_FEC_SUPP_BASER	BIT_ULL(60)
+#define NSP_ETH_PORT_FEC_SUPP_RS	BIT_ULL(61)
+#define NSP_ETH_PORT_SUPP_ANEG		BIT_ULL(63)
 
 #define NSP_ETH_PORT_LANES_MASK		cpu_to_le64(NSP_ETH_PORT_LANES)
 
@@ -67,6 +40,10 @@
 #define NSP_ETH_STATE_MEDIA		GENMASK_ULL(21, 20)
 #define NSP_ETH_STATE_OVRD_CHNG		BIT_ULL(22)
 #define NSP_ETH_STATE_ANEG		GENMASK_ULL(25, 23)
+#define NSP_ETH_STATE_FEC		GENMASK_ULL(27, 26)
+#define NSP_ETH_STATE_ACT_FEC		GENMASK_ULL(29, 28)
+#define NSP_ETH_STATE_TX_PAUSE		BIT_ULL(31)
+#define NSP_ETH_STATE_RX_PAUSE		BIT_ULL(32)
 
 #define NSP_ETH_CTRL_CONFIGURED		BIT_ULL(0)
 #define NSP_ETH_CTRL_ENABLED		BIT_ULL(1)
@@ -75,6 +52,10 @@
 #define NSP_ETH_CTRL_SET_RATE		BIT_ULL(4)
 #define NSP_ETH_CTRL_SET_LANES		BIT_ULL(5)
 #define NSP_ETH_CTRL_SET_ANEG		BIT_ULL(6)
+#define NSP_ETH_CTRL_SET_FEC		BIT_ULL(7)
+#define NSP_ETH_CTRL_SET_IDMODE		BIT_ULL(8)
+#define NSP_ETH_CTRL_SET_TX_PAUSE	BIT_ULL(10)
+#define NSP_ETH_CTRL_SET_RX_PAUSE	BIT_ULL(11)
 
 enum nfp_eth_raw {
 	NSP_ETH_RAW_PORT = 0,
@@ -152,6 +133,7 @@ nfp_eth_port_translate(struct nfp_nsp *nsp, const union eth_table_entry *src,
 		       unsigned int index, struct nfp_eth_table_port *dst)
 {
 	unsigned int rate;
+	unsigned int fec;
 	u64 port, state;
 
 	port = le64_to_cpu(src->port);
@@ -183,6 +165,34 @@ nfp_eth_port_translate(struct nfp_nsp *nsp, const union eth_table_entry *src,
 
 	dst->override_changed = FIELD_GET(NSP_ETH_STATE_OVRD_CHNG, state);
 	dst->aneg = FIELD_GET(NSP_ETH_STATE_ANEG, state);
+
+	if (nfp_nsp_get_abi_ver_minor(nsp) < 22)
+		return;
+
+	fec = FIELD_GET(NSP_ETH_PORT_FEC_SUPP_BASER, port);
+	dst->fec_modes_supported |= fec << NFP_FEC_BASER_BIT;
+	fec = FIELD_GET(NSP_ETH_PORT_FEC_SUPP_RS, port);
+	dst->fec_modes_supported |= fec << NFP_FEC_REED_SOLOMON_BIT;
+	if (dst->fec_modes_supported)
+		dst->fec_modes_supported |= NFP_FEC_AUTO | NFP_FEC_DISABLED;
+
+	dst->fec = FIELD_GET(NSP_ETH_STATE_FEC, state);
+	dst->act_fec = dst->fec;
+
+	if (nfp_nsp_get_abi_ver_minor(nsp) < 33)
+		return;
+
+	dst->act_fec = FIELD_GET(NSP_ETH_STATE_ACT_FEC, state);
+	dst->supp_aneg = FIELD_GET(NSP_ETH_PORT_SUPP_ANEG, port);
+
+	if (nfp_nsp_get_abi_ver_minor(nsp) < 37) {
+		dst->tx_pause = true;
+		dst->rx_pause = true;
+		return;
+	}
+
+	dst->tx_pause = FIELD_GET(NSP_ETH_STATE_TX_PAUSE, state);
+	dst->rx_pause = FIELD_GET(NSP_ETH_STATE_RX_PAUSE, state);
 }
 
 static void
@@ -219,12 +229,39 @@ nfp_eth_calc_port_type(struct nfp_cpp *cpp, struct nfp_eth_table_port *entry)
 	if (entry->interface == NFP_INTERFACE_NONE) {
 		entry->port_type = PORT_NONE;
 		return;
+	} else if (entry->interface == NFP_INTERFACE_RJ45) {
+		entry->port_type = PORT_TP;
+		return;
 	}
 
 	if (entry->media == NFP_MEDIA_FIBRE)
 		entry->port_type = PORT_FIBRE;
 	else
 		entry->port_type = PORT_DA;
+}
+
+static void
+nfp_eth_read_media(struct nfp_cpp *cpp, struct nfp_nsp *nsp, struct nfp_eth_table_port *entry)
+{
+	struct nfp_eth_media_buf ethm = {
+		.eth_index = entry->eth_index,
+	};
+	unsigned int i;
+	int ret;
+
+	if (!nfp_nsp_has_read_media(nsp))
+		return;
+
+	ret = nfp_nsp_read_media(nsp, &ethm, sizeof(ethm));
+	if (ret) {
+		nfp_err(cpp, "Reading media link modes failed: %d\n", ret);
+		return;
+	}
+
+	for (i = 0; i < 2; i++) {
+		entry->link_modes_supp[i] = le64_to_cpu(ethm.supported_modes[i]);
+		entry->link_modes_ad[i] = le64_to_cpu(ethm.advertised_modes[i]);
+	}
 }
 
 /**
@@ -282,8 +319,7 @@ __nfp_eth_read_ports(struct nfp_cpp *cpp, struct nfp_nsp *nsp)
 		goto err;
 	}
 
-	table = kzalloc(sizeof(*table) +
-			sizeof(struct nfp_eth_table_port) * cnt, GFP_KERNEL);
+	table = kzalloc(struct_size(table, ports, cnt), GFP_KERNEL);
 	if (!table)
 		goto err;
 
@@ -294,8 +330,10 @@ __nfp_eth_read_ports(struct nfp_cpp *cpp, struct nfp_nsp *nsp)
 					       &table->ports[j++]);
 
 	nfp_eth_calc_port_geometry(cpp, table);
-	for (i = 0; i < table->count; i++)
+	for (i = 0; i < table->count; i++) {
 		nfp_eth_calc_port_type(cpp, &table->ports[i]);
+		nfp_eth_read_media(cpp, nsp, &table->ports[i]);
+	}
 
 	kfree(entries);
 
@@ -469,10 +507,10 @@ int nfp_eth_set_configured(struct nfp_cpp *cpp, unsigned int idx, bool configed)
 	return nfp_eth_config_commit_end(nsp);
 }
 
-/* Force inline, FIELD_* macroes require masks to be compilation-time known */
-static __always_inline int
+static int
 nfp_eth_set_bit_config(struct nfp_nsp *nsp, unsigned int raw_idx,
-		       const u64 mask, unsigned int val, const u64 ctrl_bit)
+		       const u64 mask, const unsigned int shift,
+		       u64 val, const u64 ctrl_bit)
 {
 	union eth_table_entry *entries = nfp_nsp_config_entries(nsp);
 	unsigned int idx = nfp_nsp_config_idx(nsp);
@@ -489,11 +527,11 @@ nfp_eth_set_bit_config(struct nfp_nsp *nsp, unsigned int raw_idx,
 
 	/* Check if we are already in requested state */
 	reg = le64_to_cpu(entries[idx].raw[raw_idx]);
-	if (val == FIELD_GET(mask, reg))
+	if (val == (reg & mask) >> shift)
 		return 0;
 
 	reg &= ~mask;
-	reg |= FIELD_PREP(mask, val);
+	reg |= (val << shift) & mask;
 	entries[idx].raw[raw_idx] = cpu_to_le64(reg);
 
 	entries[idx].control |= cpu_to_le64(ctrl_bit);
@@ -502,6 +540,43 @@ nfp_eth_set_bit_config(struct nfp_nsp *nsp, unsigned int raw_idx,
 
 	return 0;
 }
+
+int nfp_eth_set_idmode(struct nfp_cpp *cpp, unsigned int idx, bool state)
+{
+	union eth_table_entry *entries;
+	struct nfp_nsp *nsp;
+	u64 reg;
+
+	nsp = nfp_eth_config_start(cpp, idx);
+	if (IS_ERR(nsp))
+		return PTR_ERR(nsp);
+
+	/* Set this features were added in ABI 0.32 */
+	if (nfp_nsp_get_abi_ver_minor(nsp) < 32) {
+		nfp_err(nfp_nsp_cpp(nsp),
+			"set id mode operation not supported, please update flash\n");
+		nfp_eth_config_cleanup_end(nsp);
+		return -EOPNOTSUPP;
+	}
+
+	entries = nfp_nsp_config_entries(nsp);
+
+	reg = le64_to_cpu(entries[idx].control);
+	reg &= ~NSP_ETH_CTRL_SET_IDMODE;
+	reg |= FIELD_PREP(NSP_ETH_CTRL_SET_IDMODE, state);
+	entries[idx].control = cpu_to_le64(reg);
+
+	nfp_nsp_config_set_modified(nsp, true);
+
+	return nfp_eth_config_commit_end(nsp);
+}
+
+#define NFP_ETH_SET_BIT_CONFIG(nsp, raw_idx, mask, val, ctrl_bit)	\
+	({								\
+		__BF_FIELD_CHECK(mask, 0ULL, val, "NFP_ETH_SET_BIT_CONFIG: "); \
+		nfp_eth_set_bit_config(nsp, raw_idx, mask, __bf_shf(mask), \
+				       val, ctrl_bit);			\
+	})
 
 /**
  * __nfp_eth_set_aneg() - set PHY autonegotiation control bit
@@ -515,9 +590,131 @@ nfp_eth_set_bit_config(struct nfp_nsp *nsp, unsigned int raw_idx,
  */
 int __nfp_eth_set_aneg(struct nfp_nsp *nsp, enum nfp_eth_aneg mode)
 {
-	return nfp_eth_set_bit_config(nsp, NSP_ETH_RAW_STATE,
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_STATE,
 				      NSP_ETH_STATE_ANEG, mode,
 				      NSP_ETH_CTRL_SET_ANEG);
+}
+
+/**
+ * __nfp_eth_set_fec() - set PHY forward error correction control bit
+ * @nsp:	NFP NSP handle returned from nfp_eth_config_start()
+ * @mode:	Desired fec mode
+ *
+ * Set the PHY module forward error correction mode.
+ * Will write to hwinfo overrides in the flash (persistent config).
+ *
+ * Return: 0 or -ERRNO.
+ */
+static int __nfp_eth_set_fec(struct nfp_nsp *nsp, enum nfp_eth_fec mode)
+{
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_STATE,
+				      NSP_ETH_STATE_FEC, mode,
+				      NSP_ETH_CTRL_SET_FEC);
+}
+
+/**
+ * nfp_eth_set_fec() - set PHY forward error correction control mode
+ * @cpp:	NFP CPP handle
+ * @idx:	NFP chip-wide port index
+ * @mode:	Desired fec mode
+ *
+ * Return:
+ * 0 - configuration successful;
+ * 1 - no changes were needed;
+ * -ERRNO - configuration failed.
+ */
+int
+nfp_eth_set_fec(struct nfp_cpp *cpp, unsigned int idx, enum nfp_eth_fec mode)
+{
+	struct nfp_nsp *nsp;
+	int err;
+
+	nsp = nfp_eth_config_start(cpp, idx);
+	if (IS_ERR(nsp))
+		return PTR_ERR(nsp);
+
+	err = __nfp_eth_set_fec(nsp, mode);
+	if (err) {
+		nfp_eth_config_cleanup_end(nsp);
+		return err;
+	}
+
+	return nfp_eth_config_commit_end(nsp);
+}
+
+/**
+ * __nfp_eth_set_txpause() - set tx pause control bit
+ * @nsp:	NFP NSP handle returned from nfp_eth_config_start()
+ * @tx_pause:	TX pause switch
+ *
+ * Set TX pause switch.
+ *
+ * Return: 0 or -ERRNO.
+ */
+static int __nfp_eth_set_txpause(struct nfp_nsp *nsp, unsigned int tx_pause)
+{
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_STATE, NSP_ETH_STATE_TX_PAUSE,
+				      tx_pause, NSP_ETH_CTRL_SET_TX_PAUSE);
+}
+
+/**
+ * __nfp_eth_set_rxpause() - set rx pause control bit
+ * @nsp:	NFP NSP handle returned from nfp_eth_config_start()
+ * @rx_pause:	RX pause switch
+ *
+ * Set RX pause switch.
+ *
+ * Return: 0 or -ERRNO.
+ */
+static int __nfp_eth_set_rxpause(struct nfp_nsp *nsp, unsigned int rx_pause)
+{
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_STATE, NSP_ETH_STATE_RX_PAUSE,
+				      rx_pause, NSP_ETH_CTRL_SET_RX_PAUSE);
+}
+
+/**
+ * nfp_eth_set_pauseparam() - Set TX/RX pause switch.
+ * @cpp:	NFP CPP handle
+ * @idx:	NFP chip-wide port index
+ * @tx_pause:	TX pause switch
+ * @rx_pause:	RX pause switch
+ *
+ * Return:
+ * 0 - configuration successful;
+ * 1 - no changes were needed;
+ * -ERRNO - configuration failed.
+ */
+int
+nfp_eth_set_pauseparam(struct nfp_cpp *cpp, unsigned int idx,
+		       unsigned int tx_pause, unsigned int rx_pause)
+{
+	struct nfp_nsp *nsp;
+	int err;
+
+	nsp = nfp_eth_config_start(cpp, idx);
+	if (IS_ERR(nsp))
+		return PTR_ERR(nsp);
+
+	if (nfp_nsp_get_abi_ver_minor(nsp) < 37) {
+		nfp_err(nfp_nsp_cpp(nsp),
+			"set pause parameter operation not supported, please update flash\n");
+		nfp_eth_config_cleanup_end(nsp);
+		return -EOPNOTSUPP;
+	}
+
+	err = __nfp_eth_set_txpause(nsp, tx_pause);
+	if (err) {
+		nfp_eth_config_cleanup_end(nsp);
+		return err;
+	}
+
+	err = __nfp_eth_set_rxpause(nsp, rx_pause);
+	if (err) {
+		nfp_eth_config_cleanup_end(nsp);
+		return err;
+	}
+
+	return nfp_eth_config_commit_end(nsp);
 }
 
 /**
@@ -544,7 +741,7 @@ int __nfp_eth_set_speed(struct nfp_nsp *nsp, unsigned int speed)
 		return -EINVAL;
 	}
 
-	return nfp_eth_set_bit_config(nsp, NSP_ETH_RAW_STATE,
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_STATE,
 				      NSP_ETH_STATE_RATE, rate,
 				      NSP_ETH_CTRL_SET_RATE);
 }
@@ -561,6 +758,6 @@ int __nfp_eth_set_speed(struct nfp_nsp *nsp, unsigned int speed)
  */
 int __nfp_eth_set_split(struct nfp_nsp *nsp, unsigned int lanes)
 {
-	return nfp_eth_set_bit_config(nsp, NSP_ETH_RAW_PORT, NSP_ETH_PORT_LANES,
+	return NFP_ETH_SET_BIT_CONFIG(nsp, NSP_ETH_RAW_PORT, NSP_ETH_PORT_LANES,
 				      lanes, NSP_ETH_CTRL_SET_LANES);
 }
